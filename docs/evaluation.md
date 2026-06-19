@@ -65,6 +65,7 @@ recall@1, exact recall@1, query latency, and coordinate footprint.
 | full-D exact (flat) | **84.9 %** | **100 %** | 3020 | 1024 |
 | OctaSoma PCA-3D | 33.8 % | 0.1 % | **1.70** | **12** |
 | OctaSoma JL-3D | 7.3 % | 0.0 % | 1.67 | 12 |
+| OctaSoma supervised-3D (label-aware) | 37.2 % | 0.0 % | 1.5 | 12 |
 | **PCA-3D pre-filter → full-D rerank** | **78.7 %** | 2.5 % | 32.6 | — |
 
 Reading (machine-dependent, synthetic data):
@@ -74,7 +75,12 @@ Reading (machine-dependent, synthetic data):
   linear scan (1.7 µs vs 3020 µs).
 - **Recall:** standalone PCA-3D reaches only ~40 % of the full-D cluster-recall
   ceiling at 16 themes, and ~0 % exact — the honest cost of three dimensions. PCA
-  beats JL **~4.6×** (33.8 % vs 7.3 %).
+  beats JL **~4.6×** (33.8 % vs 7.3 %). A **label-aware** projection (PCA on the
+  class centroids — a cheap, dependency-free LDA-like map) lifts this further where
+  it matters: 33.8 %→37.2 % at 16 themes, while both saturate at **~99.8 %** for ≤4
+  themes. The binding constraint is the 3-D bottleneck, not the projection method —
+  so a heavier exact LDA/SVD buys little here; per-cluster projections or the
+  pre-filter regime are where larger gains live.
 - **The useful niche:** used as a **Stage-0 pre-filter** (3-D octree proposes 50
   candidates, exact full-D distance reranks them), OctaSoma recovers **78.7 %
   cluster recall — ~93 % of the full-D ceiling — at ~90× lower query cost** (50 vs

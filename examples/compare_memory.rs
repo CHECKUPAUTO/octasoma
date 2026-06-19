@@ -66,6 +66,31 @@ fn main() {
         jl.insert(v, Some(&label[i].to_le_bytes()));
     }
 
+    // ---- (4) OctaSoma supervised-3D: PCA on the class CENTROIDS ----
+    // A cheap, label-aware (LDA-like) projection: the top-3 directions of
+    // between-theme variance. Reuses the PCA path on the centroid matrix.
+    let mut cent = vec![0f64; clusters * d];
+    let mut cnt = vec![0usize; clusters];
+    for (i, v) in data.iter().enumerate() {
+        let c = label[i] as usize;
+        cnt[c] += 1;
+        for (slot, &x) in cent[c * d..c * d + d].iter_mut().zip(v.iter()) {
+            *slot += x as f64;
+        }
+    }
+    for (chunk, &count) in cent.chunks_mut(d).zip(cnt.iter()) {
+        if count > 0 {
+            for slot in chunk.iter_mut() {
+                *slot /= count as f64;
+            }
+        }
+    }
+    let cent_f: Vec<f32> = cent.iter().map(|&x| x as f32).collect();
+    let mut sup = FractalMemory3D::new_with_pca(d, &cent_f, clusters);
+    for (i, v) in data.iter().enumerate() {
+        sup.insert(v, Some(&label[i].to_le_bytes()));
+    }
+
     let eval = |mem: &FractalMemory3D| -> (f64, f64, f64) {
         let t = Instant::now();
         let (mut cl, mut ex) = (0usize, 0usize);
@@ -83,6 +108,7 @@ fn main() {
     };
     let (pca_cl, pca_ex, pca_lat) = eval(&pca);
     let (jl_cl, jl_ex, jl_lat) = eval(&jl);
+    let (sup_cl, sup_ex, sup_lat) = eval(&sup);
 
     // ---- report: the comparison table ----
     let coord_full = 4 * d; // D float32 coordinates per item
@@ -103,6 +129,10 @@ fn main() {
     println!(
         "{:<22} {:>9.1}% {:>8.1}% {:>12.2} {:>14}",
         "OctaSoma JL-3D", jl_cl, jl_ex, jl_lat, coord_octa
+    );
+    println!(
+        "{:<22} {:>9.1}% {:>8.1}% {:>12.2} {:>14}",
+        "OctaSoma supervised-3D", sup_cl, sup_ex, sup_lat, coord_octa
     );
     println!(
         "\ncoordinate footprint: OctaSoma stores 3 floats/item vs {d} → {}× smaller; \
