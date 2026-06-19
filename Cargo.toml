@@ -1,0 +1,25 @@
+[package]
+name = "octasoma"
+version = "0.3.0"
+edition = "2024"
+description = "3D Fractal Semantic Memory engine with PCA projection, LZ4 compression, and Python bindings"
+
+[lib]
+name = "octasoma"
+crate-type = ["rlib"]
+
+[dependencies]
+lz4_flex = "0.11"
+pyo3 = { version = "0.23", optional = true, features = [] }
+tokio = { version = "1", optional = true, features = ["rt", "sync", "macros"] }
+arc-swap = { version = "1", optional = true }
+
+[features]
+default = []
+python = ["pyo3", "tokio", "arc-swap"]
+extension-module = ["python", "pyo3/extension-module"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
