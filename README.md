@@ -234,6 +234,10 @@ let e = mem.explain(&query, 5).unwrap();      // Explanation { query_point, neig
 let json = mem.export_points_json(100_000);   // {count, half_size, points:[{x,y,z,payload}]}
 ```
 
+Then open [`viewer/index.html`](viewer/index.html) in any browser and drop
+`memory.json` onto it — an offline, dependency-free 3-D scatter you can rotate,
+zoom, and hover to read each memory.
+
 This is what a black-box high-dimensional ANN cannot offer: a memory you can
 inspect and *see*, not just query.
 

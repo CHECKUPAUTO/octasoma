@@ -114,6 +114,41 @@ fn kernel_exposes_system_prompt_and_tools() {
     assert!(k.system_prompt().contains("Relevant memories"));
     assert!(MEMORY_TOOL_SCHEMA_JSON.contains("memory_store"));
     assert!(MEMORY_TOOL_SCHEMA_JSON.contains("memory_recall"));
+    assert!(MEMORY_TOOL_SCHEMA_JSON.contains("memory_explain"));
+}
+
+#[test]
+fn agent_zoom_and_path() {
+    let mut a = OctaSomaAgent::new(HashEmbedder::new(128), 9);
+    for i in 0..500 {
+        a.perceive(&format!("memory number {i}")).unwrap();
+    }
+    let q = "memory number 123";
+    // Root zoom covers everything.
+    let root = a.zoom(q, 0, 1).unwrap().unwrap();
+    assert_eq!(root.count, a.len());
+    // The path narrows from the whole memory toward the query.
+    let path = a.zoom_path(q, 16, 1).unwrap();
+    assert_eq!(path[0].count, a.len());
+    assert!(path.last().unwrap().count <= path[0].count);
+}
+
+#[test]
+fn kernel_explain_is_auditable() {
+    let mut k = MemoryKernel::with_defaults(HashEmbedder::new(128), 3);
+    k.observe("the user lives in Berlin").unwrap();
+    k.observe("the user prefers metric units").unwrap();
+    let e = k
+        .explain("the user prefers metric units", 2)
+        .unwrap()
+        .unwrap();
+    assert!(!e.neighbors.is_empty());
+    // The deterministic embedder makes the queried text its own nearest memory.
+    assert_eq!(
+        String::from_utf8_lossy(&e.neighbors[0].payload),
+        "the user prefers metric units"
+    );
+    assert!(e.neighbors[0].distance < 1e-4);
 }
 
 #[test]

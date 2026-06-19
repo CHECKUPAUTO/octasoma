@@ -133,6 +133,12 @@ impl<E: Embedder> MemoryKernel<E> {
         Ok(self.format_context(&memories))
     }
 
+    /// Explains a recall (auditable): the query's 3-D position, the coarse→fine
+    /// regions it falls through, and the nearest memories with distances.
+    pub fn explain(&self, query: &str, k: usize) -> Result<Option<crate::Explanation>, EmbedError> {
+        self.agent.explain(query, k)
+    }
+
     /// One cognitive step: recall context for `input`, optionally store `input`.
     pub fn step(&mut self, input: &str, remember_input: bool) -> Result<MemoryStep, EmbedError> {
         let retrieved = self.agent.recall(input, self.config.top_k)?;
@@ -251,6 +257,18 @@ pub const MEMORY_TOOL_SCHEMA_JSON: &str = r#"[
       "properties": {
         "query": { "type": "string", "description": "What to look up in memory." },
         "top_k": { "type": "integer", "description": "Maximum memories to return.", "default": 5 }
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "memory_explain",
+    "description": "Explain why a query recalls what it does: the query's 3-D position, the nested regions it falls through (coarse→fine), and the nearest memories with distances. Use to audit or justify a recall.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "query": { "type": "string", "description": "The query to explain." },
+        "top_k": { "type": "integer", "description": "Nearest memories to include.", "default": 5 }
       },
       "required": ["query"]
     }
