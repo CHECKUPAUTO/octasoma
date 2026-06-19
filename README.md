@@ -64,6 +64,48 @@ project (and of the accompanying [paper](paper/)).
 | Persistence | Versioned `FRAC` v3 file, LZ4-compressed payload arena |
 | Safety | `#![forbid(unsafe_code)]`-clean; one dependency (`lz4_flex`) |
 
+## Install
+
+### Command-line tool (simplest — no code)
+
+```bash
+git clone https://github.com/checkupauto/octasoma && cd octasoma
+./install.sh                 # builds, tests, installs the `octasoma` CLI
+```
+
+Then store and recall memories straight from your shell:
+
+```bash
+octasoma remember "I prefer dark mode and the metric system"
+octasoma recall   "what are my preferences?"
+octasoma reflect  "preferences" -k 3      # a prompt-ready context block
+octasoma stats
+```
+
+By default the CLI embeds text with a local [Ollama](https://ollama.com) model
+(`nomic-embed-text`). Add `--hash` to run **fully offline** (exact-text recall,
+no model needed). Run `octasoma help` for all options.
+
+### As a Rust library
+
+```bash
+cargo add octasoma
+# or in Cargo.toml:
+#   octasoma = { git = "https://github.com/checkupauto/octasoma" }
+```
+
+### From source
+
+```bash
+git clone https://github.com/checkupauto/octasoma && cd octasoma
+make build      # cargo build --release
+make test       # 60+ tests (make stress for the 1M-insert soak)
+make demo       # offline agent demo
+```
+
+Requires a stable Rust toolchain (edition 2024, Rust ≥ 1.85). The library has a
+single dependency (`lz4_flex`); the CLI, agent, and HTTP embedder use only `std`.
+
 ## Quickstart
 
 ```toml
@@ -142,6 +184,12 @@ let context: String = agent.reflect("what does the user remember?", 3)?;
 Run the offline demo with `cargo run --release --example agent_demo`. Details in
 [`docs/agent.md`](docs/agent.md).
 
+For a full agent integration there is a **memory kernel** — an opinionated routine
+(`observe` / `step` / `recall_context`) bundled with a ready-made system prompt and
+tool schema for wiring memory into an LLM. See
+[`docs/integration-kernel.md`](docs/integration-kernel.md) and
+`cargo run --release --example kernel_loop`.
+
 ## Evaluation
 
 All numbers are reproducible with the bundled harness and are *machine-dependent*:
@@ -187,6 +235,7 @@ the number of latent themes (`N = 20 000`, `D = 128`):
 | [`docs/architecture.md`](docs/architecture.md) | Data structures, octree, k-NN, projection, world growth |
 | [`docs/api.md`](docs/api.md) | Full public API reference with examples |
 | [`docs/agent.md`](docs/agent.md) | Agent layer: embedders, perceive/recall/reflect |
+| [`docs/integration-kernel.md`](docs/integration-kernel.md) | Wiring memory into an AI agent: kernel API, system prompt, tool schemas |
 | [`docs/file-format.md`](docs/file-format.md) | The `FRAC` v3 on-disk format, byte-by-byte |
 | [`docs/evaluation.md`](docs/evaluation.md) | Methodology, full results, interpretation, limitations |
 | [`paper/`](paper/) | arXiv-style paper (English & French sources) |
@@ -196,13 +245,19 @@ Build the API docs locally with `cargo doc --open`.
 ## Tests
 
 ```bash
-cargo test --release      # 20 unit/integration tests
-cargo clippy --all-targets
+cargo test --release                               # 60+ unit & integration tests
+cargo test --release --test stress -- --ignored    # heavy soak (1M inserts)
+cargo clippy --all-targets -- -D warnings
 ```
 
-The suite includes a property-style check that the octree k-NN is **bit-identical
-to brute force** over thousands of random points, round-trip persistence, dynamic
-world growth, and duplicate-point retention.
+A deliberately large suite covers: a **property check that the octree k-NN is
+bit-identical to brute force** across hundreds of randomised configurations; an
+**oracle** that interleaves inserts and queries and re-verifies exactness at every
+step; **structural invariants** (items form a permutation across leaf buckets, all
+node links valid); **persistence fuzzing** (round-trip fidelity + corruption
+rejection); **edge cases** (NaN/inf, `k = 0`, dimension mismatch, 1 MiB payloads,
+extreme world growth); **determinism**; the **agent + memory kernel**; and an
+`#[ignore]`d **soak of 1,000,000 inserts** that also re-checks exactness at scale.
 
 ## Design notes & limitations
 

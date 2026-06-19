@@ -41,9 +41,11 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 
 pub mod agent;
 pub mod embed;
+pub mod kernel;
 
 pub use agent::OctaSomaAgent;
 pub use embed::{EmbedError, Embedder, HashEmbedder, OllamaEmbedder};
+pub use kernel::{KernelConfig, MEMORY_TOOL_SCHEMA_JSON, MemoryKernel, MemoryStep};
 
 // ---------------------------------------------------------------------------
 // Type aliases & sentinels
@@ -587,6 +589,12 @@ impl FractalMemory3D {
     pub fn insert(&mut self, embedding: &[f32], payload: Option<&[u8]>) -> Option<ItemId> {
         let point = self.project(embedding)?;
 
+        // Reject non-finite projections (NaN/inf embeddings) instead of storing a
+        // poisoned point that would corrupt distance ordering and tree geometry.
+        if !point.iter().all(|c| c.is_finite()) {
+            return None;
+        }
+
         // Grow the world to contain the point if necessary.
         let max_coord = point[0].abs().max(point[1].abs()).max(point[2].abs());
         if max_coord > self.world_half_size {
@@ -710,10 +718,11 @@ impl FractalMemory3D {
     /// and any sub-cube whose lower-bound distance already exceeds the current
     /// k-th best is pruned.  The result is identical to brute force, only faster.
     pub fn nearest(&self, point: [f32; 3], k: usize) -> Vec<(ItemId, f32)> {
-        let mut heap = KnnSet::new(k);
-        if !self.items.is_empty() {
-            self.nn_descend(0, point, &mut heap);
+        if k == 0 || self.items.is_empty() || !point.iter().all(|c| c.is_finite()) {
+            return Vec::new();
         }
+        let mut heap = KnnSet::new(k);
+        self.nn_descend(0, point, &mut heap);
         heap.into_sorted()
     }
 
@@ -738,7 +747,7 @@ impl FractalMemory3D {
                 count += 1;
             }
         }
-        order[..count].sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        order[..count].sort_by(|a, b| a.0.total_cmp(&b.0));
 
         for &(lower_bound, child) in &order[..count] {
             if heap.is_full() && lower_bound >= heap.worst() {
@@ -751,6 +760,9 @@ impl FractalMemory3D {
     /// Brute-force exact `k`-NN over every stored item (reference implementation
     /// used for testing and benchmarking the octree against ground truth).
     pub fn nearest_bruteforce(&self, point: [f32; 3], k: usize) -> Vec<(ItemId, f32)> {
+        if k == 0 {
+            return Vec::new();
+        }
         let mut heap = KnnSet::new(k);
         for (id, item) in self.items.iter().enumerate() {
             heap.offer(id as ItemId, dist2(point, item.point));
@@ -1014,7 +1026,7 @@ impl KnnSet {
     }
 
     fn into_sorted(mut self) -> Vec<(ItemId, f32)> {
-        self.best.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        self.best.sort_by(|a, b| a.1.total_cmp(&b.1));
         self.best
     }
 }
