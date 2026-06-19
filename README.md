@@ -1,6 +1,6 @@
 # OctaSoma — 3-D Fractal Semantic Memory Engine
 
-[![tests](https://img.shields.io/badge/tests-20%20passing-success)](#tests)
+[![CI](https://github.com/checkupauto/octasoma/actions/workflows/ci.yml/badge.svg)](https://github.com/checkupauto/octasoma/actions/workflows/ci.yml)
 [![rust](https://img.shields.io/badge/rust-stable%2C%20edition%202024-orange)](#)
 [![unsafe](https://img.shields.io/badge/unsafe-forbidden-success)](#)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
