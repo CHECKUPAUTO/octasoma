@@ -190,6 +190,30 @@ tool schema for wiring memory into an LLM. See
 [`docs/integration-kernel.md`](docs/integration-kernel.md) and
 `cargo run --release --example kernel_loop`.
 
+## Fractal (zoomable) memory
+
+The octree is a **fractal**: it subdivides space into eight self-similar cells,
+recursively, down to `min_half_size`. Where a flat index reads only the leaves,
+OctaSoma exposes the **whole hierarchy as a multi-resolution, zoomable memory** —
+every depth is a zoom level, coarse near the root, finer toward the leaves. You can
+summarise the region a query falls in at any resolution and walk the coarse→fine
+path, navigating memory the way you zoom into a fractal image to reveal more detail.
+This multi-resolution view is what sets OctaSoma apart from using an octree as a
+plain spatial index.
+
+```rust
+use octasoma::FractalMemory3D;
+
+// `mem` is a populated engine, `query` an embedding.
+for region in mem.zoom_path(&query, 16, 1) {
+    println!("level {} — {} memories (half_size {:.3})",
+             region.level, region.count, region.half_size);
+}
+```
+
+`cargo run --release --example fractal_zoom` shows a query zooming from the whole
+store down to the handful of memories nearest it — coarse theme → exact note.
+
 ## Evaluation
 
 All numbers are reproducible with the bundled harness and are *machine-dependent*:
