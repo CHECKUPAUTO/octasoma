@@ -179,11 +179,33 @@ fn run<E: Embedder>(embedder: E, nodes: &[Node], queries: &[(String, String)]) {
     let tok = |i: usize| nodes[i].2.split_whitespace().count();
     let k = 5usize;
 
+    // Causal regions + a per-module OctaSoma index (3-D PCA calibrated on each
+    // region) — OctaSoma's best case as a reranker.
+    let mut module_members: Vec<Vec<usize>> = vec![Vec::new(); modules];
+    for (i, x) in nodes.iter().enumerate() {
+        module_members[x.1].push(i);
+    }
+    let module_index: Vec<FractalMemory3D> = module_members
+        .iter()
+        .map(|members| {
+            let flat: Vec<f32> = members
+                .iter()
+                .flat_map(|&i| node_emb[i].iter().copied())
+                .collect();
+            let mut idx = FractalMemory3D::new_with_pca(d, &flat, members.len().max(1));
+            for &i in members {
+                idx.insert(&node_emb[i], Some(&(i as u32).to_le_bytes()));
+            }
+            idx
+        })
+        .collect();
+
     let (mut processed, mut sem_hit, mut tri_hit) = (0usize, 0usize, 0usize);
     let (mut sem_rel, mut tri_rel) = (0.0f64, 0.0f64);
     let (mut sem_tok, mut tri_tok, mut causal_tok) = (0usize, 0usize, 0usize);
     let mut octa_hit = 0usize; // triad, but rerank via OctaSoma's 3-D (is 3-D enough?)
     let mut recall_us = 0.0f64; // OctaSoma global-recall latency (embedding excluded)
+    let mut octa_local_hit = 0usize; // triad with a per-MODULE OctaSoma index
 
     for (qtext, target) in queries {
         let Some(g) = nodes.iter().position(|(u, _, _)| u == target) else {
@@ -211,7 +233,7 @@ fn run<E: Embedder>(embedder: E, nodes: &[Node], queries: &[(String, String)]) {
         sem_tok += sids.iter().map(|&i| tok(i)).sum::<usize>();
 
         // causal scope = the target's module (assume CCOS surfaced it).
-        let region: Vec<usize> = (0..n).filter(|&i| nodes[i].1 == m).collect();
+        let region = &module_members[m];
         causal_tok += region.iter().map(|&i| tok(i)).sum::<usize>();
 
         // triad — semantic rerank within the causal region.
@@ -238,6 +260,18 @@ fn run<E: Embedder>(embedder: E, nodes: &[Node], queries: &[(String, String)]) {
             if c3.iter().take(k).any(|x| x.0 == g) {
                 octa_hit += 1;
             }
+        }
+
+        // Fairer variant: query the per-MODULE OctaSoma index (3-D calibrated on the
+        // region) — does OctaSoma rerank well when given a dedicated local index?
+        let lidx = &module_index[m];
+        let local: Vec<usize> = lidx
+            .nearest_embedding(&qv, k)
+            .into_iter()
+            .filter_map(|(id, _)| lidx.get_payload(id).map(decode_id))
+            .collect();
+        if local.contains(&g) {
+            octa_local_hit += 1;
         }
     }
     if processed == 0 {
@@ -290,13 +324,21 @@ fn run<E: Embedder>(embedder: E, nodes: &[Node], queries: &[(String, String)]) {
         100.0
     );
     println!(
+        "{:<26} {:>11.1} {:>10.0}% {:>15.0}%",
+        "  └ triad, OctaSoma/module",
+        af(tri_tok),
+        pf(octa_local_hit),
+        100.0
+    );
+    println!(
         "\nOctaSoma global recall: {:.1} µs/query (embedding excluded).\n\n\
-         Reading: the triad gets the target at a tiny token budget. The '└ OctaSoma\n\
-         rerank' row is the decisive test — it reranks within the (small) causal region\n\
-         using OctaSoma's 3-D instead of full-D. If its hit ≈ the full-D triad, OctaSoma\n\
-         carries the rerank (a compact, explainable engine); if much lower, the precise\n\
-         step needs full-D/SLHAv2 and OctaSoma's role is coarse routing + visualisation.\n\
-         Semantic-only (global 3-D) collapses as N grows — 3-D is a coarse router.",
+         Reading: the triad gets the target at a tiny token budget. The two '└ …' rows\n\
+         test OctaSoma AS the reranker within the causal region: 'OctaSoma rerank' uses\n\
+         the global 3-D points (filtered to the region); 'OctaSoma/module' uses a 3-D\n\
+         PCA calibrated on that region. If 'OctaSoma/module' ≈ the full-D triad, OctaSoma\n\
+         carries the rerank when given a dedicated per-region index — the deployment\n\
+         lesson. Semantic-only (one global 3-D index) collapses as N grows: 3-D is a\n\
+         coarse router, so OctaSoma belongs per-region, not as a single global index.",
         recall_us / p
     );
 }
@@ -392,4 +434,13 @@ fn rel(set: &[usize], module: usize, nodes: &[Node]) -> f64 {
 
 fn dist2(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum()
+}
+
+/// Decode a 4-byte little-endian `u32` node id stored as a payload.
+fn decode_id(b: &[u8]) -> usize {
+    if b.len() >= 4 {
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize
+    } else {
+        usize::MAX
+    }
 }
