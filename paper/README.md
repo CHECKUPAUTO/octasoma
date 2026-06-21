@@ -45,8 +45,22 @@ for C in 4 16 64 256; do
 done
 ```
 
-Latency and throughput are machine-dependent; recall figures are deterministic
-given the seeds in the harness. See [`../docs/evaluation.md`](../docs/evaluation.md).
+The cascade (Table 3, the inference-pyramid section) is reproduced on a real
+codebase with a local embedding model:
+
+```bash
+bash scripts/rs_to_nodes.sh <SRC_DIR> > nodes.tsv                 # e.g. ~/CCOS/src
+grep '^sym:' nodes.tsv | awk -F'\t' '{n=$1; sub(/.*:/,"",n); print "what does " n " do?\t" $1}' > queries.tsv
+cargo run --release --example pipeline_bench_text -- \
+  --corpus nodes.tsv --queries queries.tsv \
+  --url http://localhost:11434 --model nomic-embed-text --dim 768
+```
+
+Latency and throughput are machine-dependent; synthetic recall figures are
+deterministic given the seeds in the harness. The cascade figures depend on the
+corpus and embedding model (the paper reports a 795-node run). See
+[`../docs/evaluation.md`](../docs/evaluation.md) and
+[`../docs/integration-ecosystem.md`](../docs/integration-ecosystem.md).
 
 ## Before submission
 
