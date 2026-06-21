@@ -21,6 +21,7 @@
 //! (CCOS) disambiguates.
 
 use std::fs;
+use std::time::Instant;
 
 use octasoma::{Embedder, FractalMemory3D, HashEmbedder, OllamaEmbedder};
 
@@ -181,6 +182,8 @@ fn run<E: Embedder>(embedder: E, nodes: &[Node], queries: &[(String, String)]) {
     let (mut processed, mut sem_hit, mut tri_hit) = (0usize, 0usize, 0usize);
     let (mut sem_rel, mut tri_rel) = (0.0f64, 0.0f64);
     let (mut sem_tok, mut tri_tok, mut causal_tok) = (0usize, 0usize, 0usize);
+    let mut octa_hit = 0usize; // triad, but rerank via OctaSoma's 3-D (is 3-D enough?)
+    let mut recall_us = 0.0f64; // OctaSoma global-recall latency (embedding excluded)
 
     for (qtext, target) in queries {
         let Some(g) = nodes.iter().position(|(u, _, _)| u == target) else {
@@ -194,11 +197,13 @@ fn run<E: Embedder>(embedder: E, nodes: &[Node], queries: &[(String, String)]) {
         processed += 1;
 
         // semantic-only — OctaSoma global top-k.
+        let t = Instant::now();
         let sids: Vec<usize> = mem
             .nearest_embedding(&qv, k)
             .into_iter()
             .map(|(id, _)| id as usize)
             .collect();
+        recall_us += t.elapsed().as_secs_f64() * 1e6;
         if sids.contains(&g) {
             sem_hit += 1;
         }
@@ -221,6 +226,19 @@ fn run<E: Embedder>(embedder: E, nodes: &[Node], queries: &[(String, String)]) {
         }
         tri_rel += rel(&topk, m, nodes);
         tri_tok += topk.iter().map(|&i| tok(i)).sum::<usize>();
+
+        // Decisive variant: rerank within the region using OctaSoma's 3-D points
+        // (not full-D). Does the coarse 3-D suffice once the region is small?
+        if let Some(q3) = mem.project(&qv) {
+            let mut c3: Vec<(usize, f32)> = region
+                .iter()
+                .map(|&i| (i, dist2(&mem.items[i].point, &q3)))
+                .collect();
+            c3.sort_by(|a, b| a.1.total_cmp(&b.1));
+            if c3.iter().take(k).any(|x| x.0 == g) {
+                octa_hit += 1;
+            }
+        }
     }
     if processed == 0 {
         eprintln!("no queries processed (targets not found in corpus?)");
@@ -265,10 +283,21 @@ fn run<E: Embedder>(embedder: E, nodes: &[Node], queries: &[(String, String)]) {
         tri_rel / p * 100.0
     );
     println!(
-        "\nReading: the triad keeps target hit high at a small token budget AND 100%\n\
-         causal relevance; semantic-only spends the budget on same-topic/wrong-module\n\
-         nodes (lower relevance). At large N, OctaSoma's coarse 3-D makes the causal\n\
-         narrowing essential — try a bigger --corpus to see it."
+        "{:<26} {:>11.1} {:>10.0}% {:>15.0}%",
+        "  └ triad, OctaSoma rerank",
+        af(tri_tok),
+        pf(octa_hit),
+        100.0
+    );
+    println!(
+        "\nOctaSoma global recall: {:.1} µs/query (embedding excluded).\n\n\
+         Reading: the triad gets the target at a tiny token budget. The '└ OctaSoma\n\
+         rerank' row is the decisive test — it reranks within the (small) causal region\n\
+         using OctaSoma's 3-D instead of full-D. If its hit ≈ the full-D triad, OctaSoma\n\
+         carries the rerank (a compact, explainable engine); if much lower, the precise\n\
+         step needs full-D/SLHAv2 and OctaSoma's role is coarse routing + visualisation.\n\
+         Semantic-only (global 3-D) collapses as N grows — 3-D is a coarse router.",
+        recall_us / p
     );
 }
 
