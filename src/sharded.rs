@@ -29,9 +29,11 @@ const SHARD_VERSION: u32 = 1;
 
 /// A collection of per-region OctaSoma indices sharing one embedder.
 ///
-/// Each region gets its own [`FractalMemory3D`] (deterministic JL projection). For
-/// best recall, regions can be re-built with a PCA projection once enough samples
-/// exist; the default suits online, incremental use.
+/// Each region gets its own [`FractalMemory3D`]. [`ShardedMemory::insert`] uses a
+/// deterministic Johnson–Lindenstrauss projection, ideal for online, incremental
+/// use. [`ShardedMemory::build_pca`] bulk-builds regions with a PCA projection
+/// calibrated on each region's own embeddings — the higher-recall per-region
+/// deployment the real-scale benchmark validated.
 pub struct ShardedMemory<E: Embedder> {
     shards: HashMap<String, FractalMemory3D>,
     embedder: E,
@@ -126,6 +128,38 @@ impl<E: Embedder> ShardedMemory<E> {
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
         hits.truncate(k);
         Ok(hits.into_iter().map(|(d2, uri)| (uri, d2)).collect())
+    }
+
+    /// Bulk-builds shards from `(region, uri, text)` triples, calibrating **each
+    /// region's** 3-D projection with PCA over that region's own embeddings — the
+    /// higher-recall per-region deployment the benchmark validated (vs. the
+    /// default per-shard JL projection of [`ShardedMemory::insert`]).
+    ///
+    /// Every region named in `items` is built fresh, **replacing** any existing
+    /// shard of the same name; regions not mentioned are left untouched. Each
+    /// text is embedded once via the shared embedder.
+    pub fn build_pca(&mut self, items: &[(&str, &str, &str)]) -> Result<(), EmbedError> {
+        // Group (uri, embedding) by region, preserving each region's input order
+        // (PCA calibration is order-independent, but item insertion order is kept).
+        let mut grouped: HashMap<String, Vec<(String, Vec<f32>)>> = HashMap::new();
+        for (region, uri, text) in items {
+            let v = self.embedder.embed(text)?;
+            grouped
+                .entry((*region).to_string())
+                .or_default()
+                .push(((*uri).to_string(), v));
+        }
+
+        let dim = self.embedder.dim();
+        for (region, group) in grouped {
+            let flat: Vec<f32> = group.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+            let mut shard = FractalMemory3D::new_with_pca(dim, &flat, group.len().max(1));
+            for (uri, v) in &group {
+                shard.insert(v, Some(uri.as_bytes()));
+            }
+            self.shards.insert(region, shard);
+        }
+        Ok(())
     }
 
     /// Number of regions (shards).
@@ -327,6 +361,51 @@ mod tests {
         let m = populated();
         let hits = m.recall_global("authenticate a user", 1).unwrap();
         assert_eq!(hits, vec!["sym:src/auth.rs:login".to_string()]);
+    }
+
+    #[test]
+    fn build_pca_indexes_per_region_and_replaces() {
+        let mut m = ShardedMemory::new(HashEmbedder::new(64));
+        let items = [
+            (
+                "src/db.rs",
+                "sym:src/db.rs:query",
+                "build and run SQL queries",
+            ),
+            (
+                "src/db.rs",
+                "sym:src/db.rs:pool",
+                "a pool of db connections",
+            ),
+            (
+                "src/db.rs",
+                "sym:src/db.rs:tx",
+                "run a database transaction",
+            ),
+            (
+                "src/auth.rs",
+                "sym:src/auth.rs:login",
+                "authenticate a user",
+            ),
+            ("src/auth.rs", "sym:src/auth.rs:token", "verify a JWT token"),
+        ];
+        m.build_pca(&items).unwrap();
+        assert_eq!(m.regions(), 2);
+        assert_eq!(m.len(), 5);
+        // Exact-text recall within a region returns its uri (PCA keeps self-dist 0).
+        assert_eq!(
+            m.recall("src/db.rs", "a pool of db connections", 1)
+                .unwrap(),
+            vec!["sym:src/db.rs:pool".to_string()]
+        );
+        // Rebuilding a region replaces it; other regions are untouched.
+        m.build_pca(&[("src/db.rs", "sym:src/db.rs:only", "single survivor")])
+            .unwrap();
+        assert_eq!(
+            m.recall("src/db.rs", "single survivor", 1).unwrap(),
+            vec!["sym:src/db.rs:only".to_string()]
+        );
+        assert_eq!(m.len(), 3); // db rebuilt to 1 + auth's 2
     }
 
     #[test]
