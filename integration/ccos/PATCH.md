@@ -90,6 +90,35 @@ alongside `around`/`task`/`working_set`.
   expansion once it works.
 - `OctaIndex::save` ↔ CCOS `checkpoint`; persist alongside `workspace.ccos`.
 
+## Validated path: shard per causal region
+
+The real-scale benchmark (`docs/integration-ecosystem.md`) showed a single
+**global** OctaSoma index over ~800 nodes lands **0 %** exact hits — the 768→3
+projection is a *coarse router*, not a precise retriever. The 99 %-hit cascade
+comes from **CCOS narrowing causally first, then an exact rerank within the small
+region**. `octa_index.rs` ships `ShardedOctaIndex` for exactly that: one OctaSoma
+index per region (file), persisted as a directory of shards.
+
+```rust
+use crate::octa_index::ShardedOctaIndex;
+
+// hold beside the graph instead of (or alongside) the global OctaIndex:
+octa: ShardedOctaIndex<OllamaEmbedder>,
+
+// on ingest — CCOS already knows each node's file, so pass it explicitly:
+self.octa.index_node_in(&node.file, &node.uri, &node.content);
+
+// Recall::Semantic, when CCOS has resolved a causal region (the 99 % path):
+Recall::Semantic(text) => {
+    let anchors = self.octa.semantic_anchors_in(&region_file, text, proximity_k());
+    let ids = anchors.into_iter().map(|(uri, _)| NodeId(normalize(&uri))).collect();
+    self.assemble_window("semantic", ids, budget_tokens, /* prox */ None)
+}
+```
+
+Use `semantic_anchors` (global, coarse) only when no region is known.
+`ShardedOctaIndex::save(dir)` ↔ CCOS `checkpoint`; reopen with `open(embedder, dir)`.
+
 ## Decoupled alternative (no CCOS edits)
 
 Run the OctaSoma **MCP server** instead and have CCOS/the agent call it:

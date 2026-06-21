@@ -156,6 +156,14 @@ embedded by **Ollama `nomic-embed-text` (768-d)**, via
   `OctaSoma rerank` (global 3-D) vs `OctaSoma/module` (a 3-D PCA per region) — whose
   gap measures exactly this. Index OctaSoma **per CCOS region**, not globally.
 
+This lesson is now a first-class type: [`ShardedMemory`](../src/sharded.rs) keeps one
+OctaSoma index per region key and recalls *within* a region (`recall`/`recall_scored`),
+with a coarse cross-region fallback (`recall_global`) and directory persistence
+(`save_dir`/`open_dir`). The CCOS adapter exposes it as `ShardedOctaIndex`
+(`integration/ccos/octa_index.rs`): `index_node_in(region, uri, content)` then
+`semantic_anchors_in(region, text, k)` — the 99 %-hit path. See
+`examples/ccos_bridge.rs` for a runnable demo.
+
 Reproduce:
 
 ```bash

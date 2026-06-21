@@ -16,9 +16,16 @@
 //! ```
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::{self, Read};
 
 use crate::FractalMemory3D;
 use crate::embed::{EmbedError, Embedder};
+
+/// Magic bytes of a sharded-memory manifest (OctaSoma Multi-Shard).
+const SHARD_MAGIC: [u8; 4] = *b"OSMS";
+/// Manifest format version.
+const SHARD_VERSION: u32 = 1;
 
 /// A collection of per-region OctaSoma indices sharing one embedder.
 ///
@@ -56,20 +63,57 @@ impl<E: Embedder> ShardedMemory<E> {
     /// Recalls the `k` nearest payloads (uris) **within** `region` — the causal
     /// scope. Empty if the region is unknown.
     pub fn recall(&self, region: &str, query: &str, k: usize) -> Result<Vec<String>, EmbedError> {
+        Ok(self
+            .recall_scored(region, query, k)?
+            .into_iter()
+            .map(|(uri, _)| uri)
+            .collect())
+    }
+
+    /// Like [`ShardedMemory::recall`], but returns each hit's squared distance in
+    /// the 3-D projection (ascending — smaller is closer). Useful when callers
+    /// need a confidence/score, e.g. a CCOS `RecallItem.score`. Empty if the
+    /// region is unknown.
+    pub fn recall_scored(
+        &self,
+        region: &str,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<(String, f32)>, EmbedError> {
         let Some(shard) = self.shards.get(region) else {
             return Ok(Vec::new());
         };
         let v = self.embedder.embed(query)?;
         Ok(shard
-            .query_k(&v, k)
+            .nearest_embedding(&v, k)
             .into_iter()
-            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .filter_map(|(id, d2)| {
+                shard
+                    .get_payload(id)
+                    .map(|b| (String::from_utf8_lossy(b).into_owned(), d2))
+            })
             .collect())
     }
 
     /// Coarse recall across **all** regions (for when no causal scope is known):
     /// merges each shard's nearest and keeps the global `k` closest.
     pub fn recall_global(&self, query: &str, k: usize) -> Result<Vec<String>, EmbedError> {
+        Ok(self
+            .recall_global_scored(query, k)?
+            .into_iter()
+            .map(|(uri, _)| uri)
+            .collect())
+    }
+
+    /// Like [`ShardedMemory::recall_global`], but each hit carries its squared
+    /// distance (ascending). Note: distances are only comparable *within* a
+    /// region's projection, so this cross-region merge is a coarse heuristic —
+    /// prefer [`ShardedMemory::recall_scored`] whenever the causal scope is known.
+    pub fn recall_global_scored(
+        &self,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<(String, f32)>, EmbedError> {
         let v = self.embedder.embed(query)?;
         let mut hits: Vec<(f32, String)> = Vec::new();
         for shard in self.shards.values() {
@@ -81,7 +125,7 @@ impl<E: Embedder> ShardedMemory<E> {
         }
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
         hits.truncate(k);
-        Ok(hits.into_iter().map(|(_, uri)| uri).collect())
+        Ok(hits.into_iter().map(|(d2, uri)| (uri, d2)).collect())
     }
 
     /// Number of regions (shards).
@@ -98,6 +142,108 @@ impl<E: Embedder> ShardedMemory<E> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    // -- persistence ---------------------------------------------------------
+
+    /// Persists every shard under `dir` (one `<dir>/shard_NNNNNNNN.frac` per
+    /// region) plus a binary `manifest.osm` mapping region keys to shard files.
+    ///
+    /// The embedder is **not** stored — reopen with the same embedder via
+    /// [`ShardedMemory::open_dir`]. Region keys are sorted, so the on-disk layout
+    /// is deterministic for a given set of regions.
+    pub fn save_dir(&self, dir: &str) -> io::Result<()> {
+        fs::create_dir_all(dir)?;
+        let mut regions: Vec<&String> = self.shards.keys().collect();
+        regions.sort();
+
+        let mut manifest = Vec::new();
+        manifest.extend_from_slice(&SHARD_MAGIC);
+        manifest.extend_from_slice(&SHARD_VERSION.to_le_bytes());
+        manifest.extend_from_slice(&(self.embedder.dim() as u32).to_le_bytes());
+        manifest.extend_from_slice(&self.seed.to_le_bytes());
+        manifest.extend_from_slice(&(regions.len() as u64).to_le_bytes());
+
+        for (i, region) in regions.into_iter().enumerate() {
+            let fname = format!("shard_{i:08}.frac");
+            self.shards[region].save_to_disk(&format!("{dir}/{fname}"))?;
+            write_bytes(&mut manifest, region.as_bytes());
+            write_bytes(&mut manifest, fname.as_bytes());
+        }
+        fs::write(format!("{dir}/manifest.osm"), manifest)
+    }
+
+    /// Reopens a [`ShardedMemory`] previously written by [`ShardedMemory::save_dir`],
+    /// binding it to `embedder` (whose [`Embedder::dim`] must match the saved index).
+    pub fn open_dir(embedder: E, dir: &str) -> io::Result<Self> {
+        let bytes = fs::read(format!("{dir}/manifest.osm"))?;
+        let mut r: &[u8] = &bytes;
+
+        let mut magic = [0u8; 4];
+        r.read_exact(&mut magic)?;
+        if magic != SHARD_MAGIC {
+            return Err(invalid("not an OctaSoma shard manifest (bad magic)"));
+        }
+        let version = read_u32(&mut r)?;
+        if version != SHARD_VERSION {
+            return Err(invalid(&format!(
+                "unsupported shard manifest version {version} (this build reads v{SHARD_VERSION})"
+            )));
+        }
+        let high_dim = read_u32(&mut r)? as usize;
+        if high_dim != embedder.dim() {
+            return Err(invalid(&format!(
+                "dim mismatch: manifest has {high_dim}, embedder has {}",
+                embedder.dim()
+            )));
+        }
+        let seed = read_u64(&mut r)?;
+        let count = read_u64(&mut r)? as usize;
+
+        let mut shards = HashMap::with_capacity(count);
+        for _ in 0..count {
+            let region = read_string(&mut r)?;
+            let fname = read_string(&mut r)?;
+            let shard = FractalMemory3D::load_from_disk(&format!("{dir}/{fname}"), high_dim)?;
+            shards.insert(region, shard);
+        }
+        Ok(Self {
+            shards,
+            embedder,
+            seed,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Manifest (de)serialisation helpers — little-endian, length-prefixed.
+// ---------------------------------------------------------------------------
+
+fn write_bytes(buf: &mut Vec<u8>, b: &[u8]) {
+    buf.extend_from_slice(&(b.len() as u64).to_le_bytes());
+    buf.extend_from_slice(b);
+}
+
+fn invalid(msg: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
+}
+
+fn read_u32<R: Read>(r: &mut R) -> io::Result<u32> {
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(u32::from_le_bytes(b))
+}
+
+fn read_u64<R: Read>(r: &mut R) -> io::Result<u64> {
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b)?;
+    Ok(u64::from_le_bytes(b))
+}
+
+fn read_string<R: Read>(r: &mut R) -> io::Result<String> {
+    let len = read_u64(r)? as usize;
+    let mut b = vec![0u8; len];
+    r.read_exact(&mut b)?;
+    String::from_utf8(b).map_err(|e| invalid(&e.to_string()))
 }
 
 #[cfg(test)]
@@ -157,9 +303,52 @@ mod tests {
     }
 
     #[test]
+    fn recall_scored_is_ascending_and_scoped() {
+        let m = populated();
+        let scored = m
+            .recall_scored("src/db.rs", "build and run SQL queries", 2)
+            .unwrap();
+        assert_eq!(scored.len(), 2);
+        // Exact-text hit is the query's own uri at distance 0; scores ascend.
+        assert_eq!(scored[0].0, "sym:src/db.rs:query");
+        assert!(scored[0].1 <= scored[1].1, "distances must be ascending");
+        // All hits stay inside the region.
+        assert!(
+            scored
+                .iter()
+                .all(|(uri, _)| uri.starts_with("sym:src/db.rs:"))
+        );
+        // Unknown region yields no scores.
+        assert!(m.recall_scored("nope", "x", 3).unwrap().is_empty());
+    }
+
+    #[test]
     fn global_recall_spans_regions() {
         let m = populated();
         let hits = m.recall_global("authenticate a user", 1).unwrap();
         assert_eq!(hits, vec!["sym:src/auth.rs:login".to_string()]);
+    }
+
+    #[test]
+    fn save_dir_and_open_dir_roundtrip() {
+        let m = populated();
+        let dir = "/tmp/octasoma_sharded_roundtrip";
+        std::fs::remove_dir_all(dir).ok();
+        m.save_dir(dir).unwrap();
+
+        let loaded = ShardedMemory::open_dir(HashEmbedder::new(128), dir).unwrap();
+        assert_eq!(loaded.regions(), m.regions());
+        assert_eq!(loaded.len(), m.len());
+        // Recall is identical after a round-trip (projection + payloads restored).
+        assert_eq!(
+            loaded
+                .recall("src/db.rs", "build and run SQL queries", 1)
+                .unwrap(),
+            vec!["sym:src/db.rs:query".to_string()]
+        );
+        // An embedder with the wrong dimensionality is rejected.
+        assert!(ShardedMemory::open_dir(HashEmbedder::new(64), dir).is_err());
+
+        std::fs::remove_dir_all(dir).ok();
     }
 }
