@@ -3,7 +3,7 @@
 [![CI](https://github.com/checkupauto/octasoma/actions/workflows/ci.yml/badge.svg)](https://github.com/checkupauto/octasoma/actions/workflows/ci.yml)
 [![rust](https://img.shields.io/badge/rust-stable%2C%20edition%202024-orange)](#)
 [![unsafe](https://img.shields.io/badge/unsafe-forbidden-success)](#)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![license](https://img.shields.io/badge/license-PolyForm--NC--1.0.0-blue)](LICENSE.md)
 
 **OctaSoma** is a compact, **100 % safe stable Rust** *fractal memory* for AI
 agents. It projects embeddings to 3-D and indexes them in a cache-efficient bucket
@@ -403,4 +403,9 @@ See [`docs/evaluation.md`](docs/evaluation.md) for the honest, detailed version.
 
 ## License
 
-[MIT](LICENSE).
+OctaSoma is **dual-licensed**:
+
+- **Noncommercial & personal use** — free under the [PolyForm Noncommercial License 1.0.0](LICENSE.md) (research, study, hobby, education, public-interest organisations).
+- **Commercial use** — requires a separate commercial license; contact contact@checkupauto.fr.
+
+See [`LICENSING.md`](LICENSING.md) for the full terms.
