@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 
 use crate::embed::{EmbedError, Embedder};
 use crate::{Explanation, FractalMemory3D, RegionView, SketchIndex};
@@ -245,15 +245,42 @@ impl<E: Embedder> ShardedHybrid<E> {
         query: &str,
         k: usize,
     ) -> Result<Vec<(String, f32)>, EmbedError> {
+        self.recall_with(region, query, k, QueryStrategy::PrecisionSketch)
+    }
+
+    /// Recall within `region` with an explicit [`QueryStrategy`]. Empty if unknown.
+    pub fn recall_with(
+        &self,
+        region: &str,
+        query: &str,
+        k: usize,
+        strategy: QueryStrategy,
+    ) -> Result<Vec<(String, f32)>, EmbedError> {
         let Some(shard) = self.shards.get(region) else {
             return Ok(Vec::new());
         };
         let v = self.embedder.embed(query)?;
         Ok(shard
-            .query(&v, QueryStrategy::PrecisionSketch, k)
+            .query(&v, strategy, k)
             .into_iter()
             .map(|(p, s)| (String::from_utf8_lossy(p).into_owned(), s))
             .collect())
+    }
+
+    /// Precise **global** recall across all regions, merged by **true cosine**
+    /// (comparable across regions, unlike per-region 3-D distances) — the scope-free
+    /// path. Each region contributes its precise top-`k`.
+    pub fn recall_global(&self, query: &str, k: usize) -> Result<Vec<(String, f32)>, EmbedError> {
+        let v = self.embedder.embed(query)?;
+        let mut hits: Vec<(String, f32)> = Vec::new();
+        for shard in self.shards.values() {
+            for (p, s) in shard.query(&v, QueryStrategy::PrecisionSketch, k) {
+                hits.push((String::from_utf8_lossy(p).into_owned(), s));
+            }
+        }
+        hits.sort_by(|a, b| b.1.total_cmp(&a.1));
+        hits.truncate(k);
+        Ok(hits)
     }
 
     /// Explains a recall within `region` via its 3-D layer; `Ok(None)` if unknown.
@@ -284,6 +311,106 @@ impl<E: Embedder> ShardedHybrid<E> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// The region keys, sorted.
+    pub fn region_keys(&self) -> Vec<&str> {
+        let mut keys: Vec<&str> = self.shards.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// Persists every region's [`HybridMemory`] under `dir` (one sub-directory each)
+    /// plus a binary manifest. Reopen with the same embedder via
+    /// [`ShardedHybrid::open_dir`].
+    pub fn save_dir(&self, dir: &str) -> io::Result<()> {
+        fs::create_dir_all(dir)?;
+        let mut regions: Vec<&String> = self.shards.keys().collect();
+        regions.sort();
+
+        let mut m = Vec::new();
+        m.extend_from_slice(b"OSHH");
+        m.extend_from_slice(&1u32.to_le_bytes());
+        m.extend_from_slice(&(self.embedder.dim() as u32).to_le_bytes());
+        m.extend_from_slice(&self.seed.to_le_bytes());
+        m.extend_from_slice(&(self.bits as u64).to_le_bytes());
+        m.extend_from_slice(&(regions.len() as u64).to_le_bytes());
+        for (i, region) in regions.into_iter().enumerate() {
+            let name = format!("shard_{i:08}");
+            self.shards[region].save_dir(&format!("{dir}/{name}"))?;
+            write_bytes(&mut m, region.as_bytes());
+            write_bytes(&mut m, name.as_bytes());
+        }
+        fs::write(format!("{dir}/manifest.osh"), m)
+    }
+
+    /// Reopens a sharded-hybrid memory written by [`ShardedHybrid::save_dir`], bound
+    /// to `embedder` (whose `dim()` must match) and `bits` from the manifest.
+    pub fn open_dir(embedder: E, dir: &str) -> io::Result<Self> {
+        let bytes = fs::read(format!("{dir}/manifest.osh"))?;
+        let mut r: &[u8] = &bytes;
+        let mut magic = [0u8; 4];
+        r.read_exact(&mut magic)?;
+        if &magic != b"OSHH" {
+            return Err(invalid("not a sharded-hybrid manifest (bad magic)"));
+        }
+        let version = read_u32(&mut r)?;
+        if version != 1 {
+            return Err(invalid(&format!(
+                "unsupported sharded-hybrid version {version}"
+            )));
+        }
+        let dim = read_u32(&mut r)? as usize;
+        let seed = read_u64(&mut r)?;
+        let bits = read_u64(&mut r)? as usize;
+        if dim != embedder.dim() {
+            return Err(invalid(&format!(
+                "dim mismatch: manifest {dim}, embedder {}",
+                embedder.dim()
+            )));
+        }
+        let count = read_u64(&mut r)? as usize;
+        let mut shards = HashMap::with_capacity(count);
+        for _ in 0..count {
+            let region = read_string(&mut r)?;
+            let name = read_string(&mut r)?;
+            let hm = HybridMemory::open_dir(&format!("{dir}/{name}"), dim)?;
+            shards.insert(region, hm);
+        }
+        Ok(Self {
+            shards,
+            embedder,
+            seed,
+            bits,
+        })
+    }
+}
+
+fn write_bytes(buf: &mut Vec<u8>, b: &[u8]) {
+    buf.extend_from_slice(&(b.len() as u64).to_le_bytes());
+    buf.extend_from_slice(b);
+}
+
+fn invalid(msg: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
+}
+
+fn read_u32<R: Read>(r: &mut R) -> io::Result<u32> {
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(u32::from_le_bytes(b))
+}
+
+fn read_u64<R: Read>(r: &mut R) -> io::Result<u64> {
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b)?;
+    Ok(u64::from_le_bytes(b))
+}
+
+fn read_string<R: Read>(r: &mut R) -> io::Result<String> {
+    let len = read_u64(r)? as usize;
+    let mut b = vec![0u8; len];
+    r.read_exact(&mut b)?;
+    String::from_utf8(b).map_err(|e| invalid(&e.to_string()))
 }
 
 #[cfg(test)]
@@ -431,5 +558,40 @@ mod tests {
         // Unknown region → empty / None.
         assert!(m.recall("nope", "x", 3).unwrap().is_empty());
         assert!(m.explain("nope", "x", 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn sharded_hybrid_persistence_roundtrip() {
+        use crate::HashEmbedder;
+        let mut m = ShardedHybrid::new(HashEmbedder::new(128), 256);
+        m.insert(
+            "src/db.rs",
+            "sym:src/db.rs:pool",
+            "a pool of db connections",
+        )
+        .unwrap();
+        m.insert(
+            "src/auth.rs",
+            "sym:src/auth.rs:login",
+            "authenticate a user",
+        )
+        .unwrap();
+        let dir = "/tmp/octasoma_sharded_hybrid_roundtrip";
+        std::fs::remove_dir_all(dir).ok();
+        m.save_dir(dir).unwrap();
+
+        let loaded = ShardedHybrid::open_dir(HashEmbedder::new(128), dir).unwrap();
+        assert_eq!(loaded.regions(), m.regions());
+        assert_eq!(loaded.len(), m.len());
+        assert_eq!(
+            loaded
+                .recall("src/db.rs", "a pool of db connections", 1)
+                .unwrap()[0]
+                .0,
+            "sym:src/db.rs:pool"
+        );
+        // Wrong embedder dimensionality is rejected.
+        assert!(ShardedHybrid::open_dir(HashEmbedder::new(64), dir).is_err());
+        std::fs::remove_dir_all(dir).ok();
     }
 }

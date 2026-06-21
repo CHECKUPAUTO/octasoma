@@ -253,11 +253,14 @@ cargo build --release --features mcp     # optional feature; adds serde_json
 octasoma-mcp memory.store --hash         # or --url/--model for a real Ollama model
 ```
 
-The server is **region-sharded** (`ShardedMemory`) — the validated deployment.
-`ingest`/`recall` take an optional `region`; when omitted it is derived from the
-CCOS-style uri (`sym:src/db.rs:query` → `src/db.rs`). With a `region`, `recall` is
-scoped to that causal region (the 99 %-hit path); without one it is a coarse
-cross-region merge. The store is a **directory** of per-region shards.
+The server is **region-sharded and hybrid** (`ShardedHybrid`): one `HybridMemory` per
+causal region — the explainable 3-D layer **and** the SimHash precision tier over the
+same items. `recall` is therefore **precise** (a SimHash shortlist → exact cosine
+rerank, `score` = cosine), with a `strategy` knob (`precise` (default) / `fast` /
+`cascade`, see [`docs/precision-sketch.md`](docs/precision-sketch.md)); `explain` still
+works via the 3-D layer. `ingest`/`recall` take an optional `region` (derived from the
+CCOS-style uri when omitted); without a `region`, `recall` merges precisely across
+regions by cosine. The store is a **directory** of per-region shards.
 
 Tools: `ingest`, `recall`, `explain`, `stats`. The `recall` result uses CCOS's
 `RecallWindow { strategy, items:[{uri,score,kind,content}], tokens }` shape, so it
