@@ -13,9 +13,19 @@ categories = ["data-structures", "science", "algorithms"]
 name = "octasoma"
 
 [dependencies]
-# The only runtime dependency: a fast, pure-Rust LZ4 codec for payload persistence.
-# The agent layer and the HTTP (Ollama) embedder use the standard library only.
+# The only *default* runtime dependency: a fast, pure-Rust LZ4 codec for payload
+# persistence. The agent layer and the HTTP (Ollama) embedder use only std.
 lz4_flex = "0.11"
+# Optional: pulled in only for the `mcp` feature (the JSON-RPC MCP server binary).
+serde_json = { version = "1", optional = true }
+
+[features]
+# Builds the `octasoma-mcp` stdio JSON-RPC server (a connector for CCOS / agents).
+mcp = ["dep:serde_json"]
+
+[[bin]]
+name = "octasoma-mcp"
+required-features = ["mcp"]
 
 [profile.release]
 lto = true
