@@ -305,6 +305,11 @@ Reproduce the table with `examples/pipeline_bench_text.rs` (see
 [`docs/integration-ecosystem.md`](docs/integration-ecosystem.md));
 `cargo run --release --example ccos_bridge` is an offline demo.
 
+**OctaCore** is the thin orchestrator that assembles the three into this cascade as
+one recall (causal → semantic → attention). A runnable prototype —
+`cargo run --release --example octacore_cascade` (real OctaSoma + toy CCOS/SLHAv2) —
+and the design live in [`docs/octacore.md`](docs/octacore.md).
+
 ## Evaluation
 
 All numbers are reproducible with the bundled harness and are *machine-dependent*:
@@ -351,6 +356,8 @@ the number of latent themes (`N = 20 000`, `D = 128`):
 | [`docs/api.md`](docs/api.md) | Full public API reference with examples |
 | [`docs/agent.md`](docs/agent.md) | Agent layer: embedders, perceive/recall/reflect |
 | [`docs/integration-kernel.md`](docs/integration-kernel.md) | Wiring memory into an AI agent: kernel API, system prompt, tool schemas |
+| [`docs/integration-ecosystem.md`](docs/integration-ecosystem.md) | CCOS · SLHAv2 ecosystem plan, the MCP connector, the validated cascade |
+| [`docs/octacore.md`](docs/octacore.md) | OctaCore: assembling CCOS + OctaSoma + SLHAv2 into one cascade |
 | [`docs/file-format.md`](docs/file-format.md) | The `FRAC` v3 on-disk format, byte-by-byte |
 | [`docs/evaluation.md`](docs/evaluation.md) | Methodology, full results, comparison vs other memory regimes |
 | [`docs/positioning.md`](docs/positioning.md) | Prior art, the closest precedent, and what we can/can't claim |
