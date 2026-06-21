@@ -183,6 +183,7 @@ visualisable) **and** the `SketchIndex` precision tier. One `insert` feeds both
 | `query` | `(&self, embedding, strategy: QueryStrategy, k) -> Vec<(&[u8], f32)>` | `FastSpatial` / `PrecisionSketch` / `HybridCascade`, all finishing with an exact rerank. |
 | `recall` / `recall_coarse` | `(&self, q, k, shortlist)` / `(&self, q, k)` | Precise (sketch) / coarse (3-D). |
 | `explain` / `zoom_path` / `export_points_json` | — | Via the 3-D layer. |
+| `export_scored_json` | `(&self, query, max_points) -> String` | Viewer JSON heat-coloured by exact cosine to `query` (see `examples/scored_viz.rs`). |
 | `save_dir` / `open_dir` | `(&self, dir)` / `(dir, dim)` | Persists both layers (`tree.frac` + `index.skch`). |
 
 `QueryStrategy`: `FastSpatial` (3-D candidates → rerank, cheapest), `PrecisionSketch`

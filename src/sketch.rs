@@ -314,6 +314,18 @@ impl SketchIndex {
         cand.into_iter().map(|(_, id)| id).collect()
     }
 
+    /// Exact cosine similarity of **every** item to `query`, in id (insertion)
+    /// order. Empty on a dimension mismatch. Useful to colour a 3-D view by
+    /// precision score.
+    pub fn scores(&self, query: &[f32]) -> Vec<f32> {
+        if query.len() != self.dim {
+            return Vec::new();
+        }
+        (0..self.len())
+            .map(|i| cosine_full(self.embedding(i), query))
+            .collect()
+    }
+
     // -- persistence ---------------------------------------------------------
 
     /// Serialises the index to a versioned `SKCH` file (little-endian; the payload

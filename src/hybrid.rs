@@ -163,6 +163,14 @@ impl HybridMemory {
         self.tree.export_points_json(max_points)
     }
 
+    /// Viewer JSON of the 3-D layer **heat-coloured by precision score**: each point
+    /// carries its exact cosine similarity to `query`. Drop it on `viewer/index.html`
+    /// to *see* which memories are closest to a query.
+    pub fn export_scored_json(&self, query: &[f32], max_points: usize) -> String {
+        self.tree
+            .export_points_json_scored(&self.sketch.scores(query), max_points)
+    }
+
     /// Read-only access to the 3-D layer (advanced inspection / the viewer).
     pub fn tree(&self) -> &FractalMemory3D {
         &self.tree
@@ -460,6 +468,24 @@ mod tests {
         assert_eq!(e.neighbors.len(), 5);
         assert!(!m.zoom_path(&q, 12, 1).is_empty());
         assert!(m.export_points_json(10).starts_with("{\"count\":150"));
+    }
+
+    #[test]
+    fn scored_export_is_heat_colourable() {
+        let dim = 16;
+        let mut m = HybridMemory::new(dim, 5, 128);
+        for i in 0..10 {
+            let mut v = vec![0.0f32; dim];
+            v[i % dim] = 1.0;
+            m.insert(&v, format!("p{i}").as_bytes());
+        }
+        let mut q = vec![0.0f32; dim];
+        q[0] = 1.0; // identical to p0 → score 1.0
+        let json = m.export_scored_json(&q, 100);
+        assert!(json.contains("\"scored\":true"));
+        assert!(json.contains("\"score\":"));
+        assert!(json.contains("\"payload\":\"p0\""));
+        assert!(json.contains("\"score\":1.0000"));
     }
 
     #[test]
