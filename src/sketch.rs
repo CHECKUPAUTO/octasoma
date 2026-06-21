@@ -105,6 +105,163 @@ pub fn cosine_from_hamming(h: u32, bits: usize) -> f32 {
     (std::f32::consts::PI * h as f32 / bits as f32).cos()
 }
 
+/// Full cosine similarity between two equal-length vectors (`0` if either is zero).
+fn cosine_full(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for i in 0..n {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    if na <= 0.0 || nb <= 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+// ---------------------------------------------------------------------------
+// SketchIndex — the high-precision retrieval tier (shortlist → exact rerank)
+// ---------------------------------------------------------------------------
+
+/// A high-precision semantic index: a SimHash sketch per item for a cheap Hamming
+/// **shortlist**, then an **exact cosine rerank** over that shortlist.
+///
+/// This is the precision counterpart to [`crate::FractalMemory3D`]: where the 3-D
+/// octree trades precision for compactness (a coarse router, exact recall@1 $\approx
+/// 0\%$), `SketchIndex` trades memory for precision — it keeps each full embedding
+/// (for the exact rerank) plus a compact sketch (for the shortlist), recovering most
+/// of the true nearest neighbours the projection discards, at a fraction of a full
+/// brute-force scan. All flat, contiguous storage; 100% safe, stable Rust.
+#[derive(Clone, Debug)]
+pub struct SketchIndex {
+    hasher: SimHasher,
+    dim: usize,
+    /// `count × dim` flat row-major embeddings (for the exact rerank).
+    embeddings: Vec<f32>,
+    /// `count × words` flat sketches (for the Hamming shortlist).
+    sketches: Vec<u64>,
+    /// Payload arena and per-item `(offset, len)`.
+    payloads: Vec<u8>,
+    offsets: Vec<(usize, usize)>,
+}
+
+impl SketchIndex {
+    /// Creates an empty index for `dim`-dimensional embeddings, sketched with `bits`
+    /// random hyperplanes (seeded).
+    pub fn new(dim: usize, bits: usize, seed: u64) -> Self {
+        let hasher = SimHasher::new(dim, bits, seed);
+        Self {
+            hasher,
+            dim,
+            embeddings: Vec::new(),
+            sketches: Vec::new(),
+            payloads: Vec::new(),
+            offsets: Vec::new(),
+        }
+    }
+
+    /// Number of indexed items.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.offsets.len()
+    }
+
+    /// Whether the index is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.offsets.is_empty()
+    }
+
+    /// Sketch bits per item.
+    #[inline]
+    pub fn bits(&self) -> usize {
+        self.hasher.bits()
+    }
+
+    /// Inserts an `embedding` with a byte `payload`. Returns `false` (and stores
+    /// nothing) if `embedding.len() != dim`.
+    pub fn insert(&mut self, embedding: &[f32], payload: &[u8]) -> bool {
+        if embedding.len() != self.dim {
+            return false;
+        }
+        self.embeddings.extend_from_slice(embedding);
+        self.sketches
+            .extend_from_slice(&self.hasher.sketch(embedding));
+        let off = self.payloads.len();
+        self.payloads.extend_from_slice(payload);
+        self.offsets.push((off, payload.len()));
+        true
+    }
+
+    fn payload(&self, i: usize) -> &[u8] {
+        let (off, len) = self.offsets[i];
+        &self.payloads[off..off + len]
+    }
+
+    fn embedding(&self, i: usize) -> &[f32] {
+        &self.embeddings[i * self.dim..(i + 1) * self.dim]
+    }
+
+    fn sketch_of(&self, i: usize) -> &[u64] {
+        let w = self.hasher.words();
+        &self.sketches[i * w..(i + 1) * w]
+    }
+
+    /// The `k` nearest payloads to `query`, by the hybrid path: take the `shortlist`
+    /// closest by **Hamming** on the sketches, then **exact-cosine** rerank them.
+    /// Returns `(payload, cosine)` descending. Larger `shortlist` → higher recall at
+    /// higher cost; `shortlist` is clamped to at least `k` and at most the index size.
+    pub fn nearest(&self, query: &[f32], k: usize, shortlist: usize) -> Vec<(&[u8], f32)> {
+        if query.len() != self.dim || k == 0 || self.is_empty() {
+            return Vec::new();
+        }
+        let qs = self.hasher.sketch(query);
+        let m = shortlist.max(k).min(self.len());
+
+        // 1. Hamming shortlist of size m.
+        let mut cand: Vec<(u32, usize)> = (0..self.len())
+            .map(|i| (hamming(&qs, self.sketch_of(i)), i))
+            .collect();
+        if cand.len() > m {
+            cand.select_nth_unstable_by_key(m - 1, |(h, _)| *h);
+            cand.truncate(m);
+        }
+
+        // 2. Exact cosine rerank of the shortlist.
+        let mut scored: Vec<(f32, usize)> = cand
+            .iter()
+            .map(|&(_, i)| (cosine_full(self.embedding(i), query), i))
+            .collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        scored.truncate(k);
+        scored
+            .into_iter()
+            .map(|(s, i)| (self.payload(i), s))
+            .collect()
+    }
+
+    /// The `k` nearest payloads by **Hamming only** (no exact rerank): cheaper and
+    /// memory could be sketch-only, but approximate. Returns `(payload, hamming)`
+    /// ascending (smaller is closer).
+    pub fn nearest_sketch(&self, query: &[f32], k: usize) -> Vec<(&[u8], u32)> {
+        if query.len() != self.dim || k == 0 || self.is_empty() {
+            return Vec::new();
+        }
+        let qs = self.hasher.sketch(query);
+        let mut cand: Vec<(u32, usize)> = (0..self.len())
+            .map(|i| (hamming(&qs, self.sketch_of(i)), i))
+            .collect();
+        let k = k.min(cand.len());
+        cand.select_nth_unstable_by_key(k - 1, |(h, _)| *h);
+        cand.truncate(k);
+        cand.sort_by_key(|(h, _)| *h);
+        cand.into_iter()
+            .map(|(h, i)| (self.payload(i), h))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +311,45 @@ mod tests {
             (mean - 512.0).abs() < 90.0,
             "mean hamming {mean} not near bits/2 for orthogonal vectors"
         );
+    }
+
+    #[test]
+    fn sketch_index_hybrid_finds_exact_neighbour() {
+        let dim = 64;
+        let mut rng = DeterministicRng::new(123);
+        let unit = |v: Vec<f32>| {
+            let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            v.iter().map(|x| x / n).collect::<Vec<f32>>()
+        };
+        let centers: Vec<Vec<f32>> = (0..6)
+            .map(|_| unit((0..dim).map(|_| rng.next_f32()).collect()))
+            .collect();
+
+        let mut idx = SketchIndex::new(dim, 256, 7);
+        for (c, center) in centers.iter().enumerate() {
+            for i in 0..30 {
+                let pt: Vec<f32> = center.iter().map(|&x| x + 0.02 * rng.next_f32()).collect();
+                idx.insert(&pt, format!("c{c}_{i}").as_bytes());
+            }
+        }
+        assert_eq!(idx.len(), 180);
+
+        // A query near cluster 3: hybrid (shortlist → exact rerank) returns a
+        // cluster-3 payload as #1, with cosine close to 1.
+        let q: Vec<f32> = centers[3]
+            .iter()
+            .map(|&x| x + 0.01 * rng.next_f32())
+            .collect();
+        let hits = idx.nearest(&q, 5, 64);
+        assert_eq!(hits.len(), 5);
+        assert!(String::from_utf8_lossy(hits[0].0).starts_with("c3_"));
+        assert!(hits[0].1 > 0.9, "top cosine should be high: {}", hits[0].1);
+        // Sketch-only ranking also lands in cluster 3 at the top.
+        let sk = idx.nearest_sketch(&q, 3);
+        assert!(String::from_utf8_lossy(sk[0].0).starts_with("c3_"));
+
+        // Dimension guards.
+        assert!(!idx.insert(&[0.0; 3], b"bad"));
+        assert!(idx.nearest(&[0.0; 3], 3, 16).is_empty());
     }
 }

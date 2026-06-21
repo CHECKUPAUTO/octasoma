@@ -53,7 +53,7 @@ pub use explain::{Explanation, Neighbor};
 pub use fractal::RegionView;
 pub use kernel::{KernelConfig, MEMORY_TOOL_SCHEMA_JSON, MemoryKernel, MemoryStep};
 pub use sharded::ShardedMemory;
-pub use sketch::{SimHasher, cosine_from_hamming, hamming};
+pub use sketch::{SimHasher, SketchIndex, cosine_from_hamming, hamming};
 
 // ---------------------------------------------------------------------------
 // Type aliases & sentinels
