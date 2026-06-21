@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
 
-use crate::FractalMemory3D;
 use crate::embed::{EmbedError, Embedder};
+use crate::{Explanation, FractalMemory3D};
 
 /// Magic bytes of a sharded-memory manifest (OctaSoma Multi-Shard).
 const SHARD_MAGIC: [u8; 4] = *b"OSMS";
@@ -128,6 +128,32 @@ impl<E: Embedder> ShardedMemory<E> {
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
         hits.truncate(k);
         Ok(hits.into_iter().map(|(d2, uri)| (uri, d2)).collect())
+    }
+
+    /// Explains a recall **within** `region` — the query's 3-D position, the
+    /// coarse→fine fractal zoom path, and the nearest memories (payload, distance,
+    /// point). The explainable, visualizable view, scoped to one causal region.
+    /// `Ok(None)` for an unknown region or a wrong-dimension / non-finite query.
+    pub fn explain(
+        &self,
+        region: &str,
+        query: &str,
+        k: usize,
+    ) -> Result<Option<Explanation>, EmbedError> {
+        let Some(shard) = self.shards.get(region) else {
+            return Ok(None);
+        };
+        let v = self.embedder.embed(query)?;
+        Ok(shard.explain(&v, k))
+    }
+
+    /// Exports one region's memories as viewer JSON (`{count, half_size,
+    /// points:[…]}`), or `None` if the region is unknown. Drop the result onto
+    /// `viewer/index.html` to *see* a causal region's semantic map.
+    pub fn export_points_json(&self, region: &str, max_points: usize) -> Option<String> {
+        self.shards
+            .get(region)
+            .map(|s| s.export_points_json(max_points))
     }
 
     /// Bulk-builds shards from `(region, uri, text)` triples, calibrating **each
@@ -324,6 +350,30 @@ mod tests {
             .recall("src/auth.rs", "build and run SQL queries", 5)
             .unwrap();
         assert!(!auth.contains(&"sym:src/db.rs:query".to_string()));
+    }
+
+    #[test]
+    fn explain_and_export_are_region_scoped() {
+        let m = populated();
+        // explain within a region: neighbors + a zoom path rooted at the region.
+        let e = m
+            .explain("src/db.rs", "build and run SQL queries", 2)
+            .unwrap()
+            .unwrap();
+        assert!(e.query_point.iter().all(|c| c.is_finite()));
+        assert!(!e.neighbors.is_empty());
+        assert_eq!(e.zoom_path[0].count, 2); // the db region holds 2 memories
+        assert!(
+            e.neighbors
+                .iter()
+                .all(|nb| String::from_utf8_lossy(&nb.payload).starts_with("sym:src/db.rs:"))
+        );
+        // Unknown region → Ok(None), not an error.
+        assert!(m.explain("nope", "x", 1).unwrap().is_none());
+        // Viewer export is scoped to the region (db has 2 points).
+        let json = m.export_points_json("src/db.rs", 100).unwrap();
+        assert!(json.starts_with("{\"count\":2"));
+        assert!(m.export_points_json("nope", 10).is_none());
     }
 
     #[test]

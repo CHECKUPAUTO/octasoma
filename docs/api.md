@@ -122,6 +122,8 @@ region — the file part of a node uri) and recalls *within* a region. See
 | `recall_scored` | `(&self, region, query, k) -> Result<Vec<(String, f32)>, EmbedError>` | Same, each hit with its squared distance (ascending). |
 | `recall_global` | `(&self, query, k) -> Result<Vec<String>, EmbedError>` | Coarse cross-region merge (use only when no scope is known). |
 | `recall_global_scored` | `(&self, query, k) -> Result<Vec<(String, f32)>, EmbedError>` | Scored variant of the above. |
+| `explain` | `(&self, region, query, k) -> Result<Option<Explanation>, EmbedError>` | Explainable recall scoped to a region (3-D point, zoom path, neighbors). `Ok(None)` if the region is unknown. |
+| `export_points_json` | `(&self, region, max_points) -> Option<String>` | A region's memories as viewer JSON for `viewer/index.html`. |
 | `save_dir` / `open_dir` | `(&self, dir)` / `(embedder, dir)` | Persist one `.frac` per region + a binary manifest; reopen against a dim-matched embedder. |
 | `regions` / `len` / `is_empty` | `(&self) -> usize` / `usize` / `bool` | Shard count / total items / emptiness. |
 
