@@ -288,7 +288,13 @@ fn builtin_queries() -> Vec<(String, String)> {
 
 /// `uri⇥content` or `uri⇥module⇥content`; module auto-derived from the uri when absent.
 fn load_nodes(path: &str) -> Vec<Node> {
-    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let text = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!(
+            "cannot read {path}: {e}\nhint: create it (scripts/rs_to_nodes.sh SRC > nodes.tsv), \
+             or drop --corpus/--queries to use the built-in demo corpus"
+        );
+        std::process::exit(1);
+    });
     let mut keys: Vec<String> = Vec::new();
     let mut out = Vec::new();
     for line in text.lines() {
@@ -315,7 +321,13 @@ fn load_nodes(path: &str) -> Vec<Node> {
 }
 
 fn load_queries(path: &str) -> Vec<(String, String)> {
-    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let text = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!(
+            "cannot read {path}: {e}\nhint: create it (scripts/rs_to_nodes.sh SRC > nodes.tsv), \
+             or drop --corpus/--queries to use the built-in demo corpus"
+        );
+        std::process::exit(1);
+    });
     let mut out = Vec::new();
     for line in text.lines() {
         if line.trim().is_empty() {
