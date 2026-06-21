@@ -14,7 +14,7 @@ repository = "https://github.com/CHECKUPAUTO/octacore"
 [workspace]
 
 [dependencies]
-octasoma = { git = "https://github.com/CHECKUPAUTO/octasoma", rev = "513ea5e0ead8d40fccea1437e4dd6677cd64574b" }
+octasoma = { git = "https://github.com/CHECKUPAUTO/octasoma", rev = "3f3e7885fb1321d64ce64936a4ee00be7db871de" }
 
 # Optional real-system adapters (built only with the matching feature):
 ccos = { git = "https://github.com/CHECKUPAUTO/CCOS", optional = true }
