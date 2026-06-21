@@ -62,6 +62,49 @@ impl<E: Embedder> ShardedMemory<E> {
         Ok(())
     }
 
+    // -- pre-embedded vectors ------------------------------------------------
+    //
+    // For callers that already hold vectors (cached embeddings, KV-cache tile
+    // latents): these bypass the embedder, which only supplies `dim()`. The
+    // vector length must equal `embedder.dim()`.
+
+    /// Stores a pre-computed `embedding` under `region` with raw `payload` bytes,
+    /// without calling the embedder (per-shard JL projection).
+    pub fn insert_vec(&mut self, region: &str, payload: &[u8], embedding: &[f32]) {
+        let (dim, seed) = (self.embedder.dim(), self.seed);
+        let shard = self
+            .shards
+            .entry(region.to_string())
+            .or_insert_with(|| FractalMemory3D::new(dim, seed));
+        shard.insert(embedding, Some(payload));
+    }
+
+    /// Builds one region's shard from pre-computed `(payload, embedding)` pairs,
+    /// calibrating its 3-D projection with PCA over those vectors. **Replaces**
+    /// any existing shard of that name. No embedder calls.
+    pub fn build_pca_vectors(&mut self, region: &str, items: &[(&[u8], &[f32])]) {
+        let dim = self.embedder.dim();
+        let flat: Vec<f32> = items.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+        let mut shard = FractalMemory3D::new_with_pca(dim, &flat, items.len().max(1));
+        for (payload, v) in items {
+            shard.insert(v, Some(payload));
+        }
+        self.shards.insert(region.to_string(), shard);
+    }
+
+    /// Recalls within `region` by a pre-computed query `embedding`, returning
+    /// `(payload, squared distance)` ascending. Empty if the region is unknown.
+    pub fn recall_vec(&self, region: &str, embedding: &[f32], k: usize) -> Vec<(Vec<u8>, f32)> {
+        let Some(shard) = self.shards.get(region) else {
+            return Vec::new();
+        };
+        shard
+            .nearest_embedding(embedding, k)
+            .into_iter()
+            .filter_map(|(id, d2)| shard.get_payload(id).map(|p| (p.to_vec(), d2)))
+            .collect()
+    }
+
     /// Recalls the `k` nearest payloads (uris) **within** `region` — the causal
     /// scope. Empty if the region is unknown.
     pub fn recall(&self, region: &str, query: &str, k: usize) -> Result<Vec<String>, EmbedError> {
@@ -463,6 +506,32 @@ mod tests {
             vec!["sym:src/db.rs:only".to_string()]
         );
         assert_eq!(m.len(), 3); // db rebuilt to 1 + auth's 2
+    }
+
+    #[test]
+    fn vector_api_inserts_builds_and_recalls() {
+        // Pre-embedded vectors (no embedder calls); dim must match embedder.dim().
+        let mut m = ShardedMemory::new(HashEmbedder::new(4));
+        m.insert_vec("a", b"a0", &[1.0, 0.0, 0.0, 0.0]);
+        m.insert_vec("a", b"a1", &[0.0, 1.0, 0.0, 0.0]);
+        let b0 = [0.0f32, 0.0, 1.0, 0.0];
+        let b1 = [0.0f32, 0.0, 0.0, 1.0];
+        m.build_pca_vectors("b", &[(b"b0", &b0), (b"b1", &b1)]);
+
+        assert_eq!(m.regions(), 2);
+        assert_eq!(m.len(), 4);
+
+        // recall_vec returns the exact vector's payload at distance ~0.
+        let hits = m.recall_vec("a", &[1.0, 0.0, 0.0, 0.0], 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, b"a0".to_vec());
+        assert!(hits[0].1.abs() < 1e-6);
+
+        // Scoping: region b's payload is unreachable from region a.
+        let from_a = m.recall_vec("a", &b0, 5);
+        assert!(from_a.iter().all(|(p, _)| *p != b"b0".to_vec()));
+        // Unknown region is empty.
+        assert!(m.recall_vec("nope", &[1.0, 0.0, 0.0, 0.0], 3).is_empty());
     }
 
     #[test]

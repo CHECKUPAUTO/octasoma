@@ -23,7 +23,7 @@
 use std::fs;
 use std::time::Instant;
 
-use octasoma::{Embedder, FractalMemory3D, HashEmbedder, OllamaEmbedder};
+use octasoma::{Embedder, FractalMemory3D, HashEmbedder, OllamaEmbedder, ShardedMemory};
 
 /// Built-in demo corpus: (uri, module index, content).
 const NODES: &[(&str, usize, &str)] = &[
@@ -180,25 +180,25 @@ fn run<E: Embedder>(embedder: E, nodes: &[Node], queries: &[(String, String)]) {
     let k = 5usize;
 
     // Causal regions + a per-module OctaSoma index (3-D PCA calibrated on each
-    // region) — OctaSoma's best case as a reranker.
+    // region) — OctaSoma's best case as a reranker. Built via the library's
+    // ShardedMemory (the validated deployment), keyed by module index.
     let mut module_members: Vec<Vec<usize>> = vec![Vec::new(); modules];
     for (i, x) in nodes.iter().enumerate() {
         module_members[x.1].push(i);
     }
-    let module_index: Vec<FractalMemory3D> = module_members
-        .iter()
-        .map(|members| {
-            let flat: Vec<f32> = members
-                .iter()
-                .flat_map(|&i| node_emb[i].iter().copied())
-                .collect();
-            let mut idx = FractalMemory3D::new_with_pca(d, &flat, members.len().max(1));
-            for &i in members {
-                idx.insert(&node_emb[i], Some(&(i as u32).to_le_bytes()));
-            }
-            idx
-        })
-        .collect();
+    let mut module_index: ShardedMemory<HashEmbedder> = ShardedMemory::new(HashEmbedder::new(d));
+    for (mi, members) in module_members.iter().enumerate() {
+        if members.is_empty() {
+            continue;
+        }
+        let payloads: Vec<[u8; 4]> = members.iter().map(|&i| (i as u32).to_le_bytes()).collect();
+        let items: Vec<(&[u8], &[f32])> = members
+            .iter()
+            .enumerate()
+            .map(|(j, &i)| (payloads[j].as_slice(), node_emb[i].as_slice()))
+            .collect();
+        module_index.build_pca_vectors(&mi.to_string(), &items);
+    }
 
     let (mut processed, mut sem_hit, mut tri_hit) = (0usize, 0usize, 0usize);
     let (mut sem_rel, mut tri_rel) = (0.0f64, 0.0f64);
@@ -264,11 +264,10 @@ fn run<E: Embedder>(embedder: E, nodes: &[Node], queries: &[(String, String)]) {
 
         // Fairer variant: query the per-MODULE OctaSoma index (3-D calibrated on the
         // region) — does OctaSoma rerank well when given a dedicated local index?
-        let lidx = &module_index[m];
-        let local: Vec<usize> = lidx
-            .nearest_embedding(&qv, k)
+        let local: Vec<usize> = module_index
+            .recall_vec(&m.to_string(), &qv, k)
             .into_iter()
-            .filter_map(|(id, _)| lidx.get_payload(id).map(decode_id))
+            .map(|(p, _)| decode_id(&p))
             .collect();
         if local.contains(&g) {
             octa_local_hit += 1;
