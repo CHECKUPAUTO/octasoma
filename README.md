@@ -55,19 +55,25 @@ cargo build --features slha      # SLHAv2 KV-cache lens via OctaSoma
 The `ccos` and `slha` features pull the upstream crates by git and require them to
 build; the default build needs only OctaSoma and is fully offline.
 
-## OctaSoma dependency
+## Status & staging
 
-OctaCore depends on OctaSoma via a **pinned git commit**, because OctaCore's `slha`
-feature needs OctaSoma's `explain.rs`, which currently lives on OctaSoma's development
-branch rather than `master`:
+This crate is **staged inside the OctaSoma repository** under `octacore/` (its own
+isolated workspace) until it is published to its own checkout of
+`CHECKUPAUTO/octacore`. To materialise the standalone crate and publish it, run from
+the octasoma checkout:
 
-```toml
-octasoma = { git = "https://github.com/CHECKUPAUTO/octasoma", rev = "a3c2761…" }
+```bash
+scripts/extract_octacore.sh /path/to/octacore-checkout
+# then follow the printed git commands (init · add · commit · remote add · push)
 ```
 
-Switch the `rev` to `branch = "master"` (or a released version) once OctaSoma merges
-that work / publishes a release. Everything else (the `ccos`/`scirust` git deps, the
-features, the example) is in its final form.
+The script rewrites the OctaSoma dependency from the local path to a git dependency
+pinned to the commit this crate is verified against. (OctaCore's `slha` feature needs
+OctaSoma's `explain.rs`, which is on the development branch — hence a pinned `rev`
+rather than `master`; switch to a released version once OctaSoma publishes one.)
+
+Everything else (the `ccos`/`scirust` git deps, the features, the example) is already
+in its final form.
 
 ## License
 
