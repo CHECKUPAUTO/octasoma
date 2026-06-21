@@ -306,9 +306,11 @@ Reproduce the table with `examples/pipeline_bench_text.rs` (see
 `cargo run --release --example ccos_bridge` is an offline demo.
 
 **OctaCore** is the thin orchestrator that assembles the three into this cascade as
-one recall (causal → semantic → attention). A runnable prototype —
-`cargo run --release --example octacore_cascade` (real OctaSoma + toy CCOS/SLHAv2) —
-and the design live in [`docs/octacore.md`](docs/octacore.md).
+one recall (CCOS causal scope → OctaSoma cosine rerank; SLHAv2 the KV-cache lens). It
+is a real crate staged at [`octacore/`](octacore/) — its `ccos`/`slha` adapters are
+verified to compile against CCOS v0.3.0 and SLHAv2 v0.2.0. Try it with
+`cargo run --manifest-path octacore/Cargo.toml --example cascade_demo`; design in
+[`docs/octacore.md`](docs/octacore.md).
 
 ## Evaluation
 

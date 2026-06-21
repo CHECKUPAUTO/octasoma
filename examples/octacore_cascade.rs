@@ -17,10 +17,11 @@
 //! ```
 //!
 //! OctaSoma is the real layer here ([`ShardedMemory`]); CCOS and SLHAv2 are toy
-//! in-file stubs (offline, deterministic) so the *shape* of OctaCore runs without
-//! the other crates. The real OctaCore crate (a separate repo depending on all
-//! three) swaps the stubs for CCOS's `ExternalMemory` and SLHAv2's tile scorer.
-//! See `docs/octacore.md`.
+//! in-file stubs (offline, deterministic) so the *shape* runs without the other
+//! crates. This is an early in-repo sketch — the real, honest crate is **`octacore/`**
+//! (CCOS as the causal scope, OctaSoma an exact cosine rerank, and SLHAv2 the
+//! KV-cache *visualisation lens*, not a text reranker). Its `ccos`/`slha` features
+//! are verified to compile against the real upstream crates. See `docs/octacore.md`.
 //!
 //! Run: `cargo run --release --example octacore_cascade`
 
