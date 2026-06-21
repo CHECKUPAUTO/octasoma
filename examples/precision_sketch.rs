@@ -50,7 +50,7 @@ fn main() {
     let (mut clus3, mut clusk, mut clusx, mut hybrid1) = (0usize, 0usize, 0usize, 0usize);
     let (mut us3, mut usk, mut usx, mut ushy) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let marks = [1usize, 32, 128, 512];
-    let shortlist = 256usize;
+    let shortlist = a.get(5).copied().unwrap_or(256);
 
     for _ in 0..q {
         let theme = (rng.next_u64() as usize) % c;
@@ -169,7 +169,7 @@ fn main() {
     );
     println!(
         "{:<24} {:>7.1}% {:>8} {:>10} {:>10} {:>9.1}% {:>10.1}",
-        "  └ hybrid (rerank 256)",
+        format!("  └ hybrid (rerank {shortlist})"),
         p(hybrid1),
         "—",
         "—",

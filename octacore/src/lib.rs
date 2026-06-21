@@ -185,7 +185,10 @@ impl<E: Embedder, C: CausalScope> Cascade<E, C> {
     /// — the high-precision tier the 3-D router cannot provide. Returns the top `k`.
     pub fn recall_global(&self, query: &str, k: usize) -> Result<RecallWindow, EmbedError> {
         let q = self.embedder.embed(query)?;
-        let shortlist = (k * 8).max(64);
+        // A generous shortlist: recall climbs steeply with it (256-bit: recall@1 of
+        // the rerank is ~12% @32, ~70% @512). The rerank cost is linear in the
+        // shortlist (one stored-embedding dot product each), so 256+ is cheap.
+        let shortlist = (k * 32).max(256);
         let mut items = Vec::new();
         let mut tokens = 0usize;
         for (payload, score) in self.global.nearest(&q, k, shortlist) {
