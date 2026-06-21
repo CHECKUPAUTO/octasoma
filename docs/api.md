@@ -104,6 +104,39 @@ FractalMemory3D::octant_index(center: [f32;3], point: [f32;3]) -> usize // 0..=7
 FractalMemory3D::child_center(parent_center: [f32;3], parent_half: f32, octant: usize) -> [f32;3]
 ```
 
+## `ShardedMemory<E: Embedder>`
+
+The **recommended deployment** for large corpora. OctaSoma's 768→3 projection is a
+*coarse router*: as one global index over thousands of nodes its exact recall
+collapses (validated at 0 %), but it is effective *per region* (small N).
+`ShardedMemory` keeps one [`FractalMemory3D`] per region key (e.g. a CCOS causal
+region — the file part of a node uri) and recalls *within* a region. See
+[integration-ecosystem.md](integration-ecosystem.md).
+
+| Method | Signature | Notes |
+|---|---|---|
+| `new` | `(embedder: E) -> Self` | Empty; shares one embedder across regions. |
+| `insert` | `(&mut self, region, uri, text: &str) -> Result<(), EmbedError>` | Online, incremental (per-shard JL projection). |
+| `build_pca` | `(&mut self, items: &[(&str,&str,&str)]) -> Result<(), EmbedError>` | Bulk-build; PCA projection calibrated **per region** — the validated higher-recall path. Replaces named regions. |
+| `recall` | `(&self, region, query, k) -> Result<Vec<String>, EmbedError>` | `k` nearest uris **within** a region (empty if unknown). |
+| `recall_scored` | `(&self, region, query, k) -> Result<Vec<(String, f32)>, EmbedError>` | Same, each hit with its squared distance (ascending). |
+| `recall_global` | `(&self, query, k) -> Result<Vec<String>, EmbedError>` | Coarse cross-region merge (use only when no scope is known). |
+| `recall_global_scored` | `(&self, query, k) -> Result<Vec<(String, f32)>, EmbedError>` | Scored variant of the above. |
+| `save_dir` / `open_dir` | `(&self, dir)` / `(embedder, dir)` | Persist one `.frac` per region + a binary manifest; reopen against a dim-matched embedder. |
+| `regions` / `len` / `is_empty` | `(&self) -> usize` / `usize` / `bool` | Shard count / total items / emptiness. |
+
+```rust
+use octasoma::{HashEmbedder, ShardedMemory};
+
+let mut mem = ShardedMemory::new(HashEmbedder::new(768));
+mem.insert("src/db.rs", "sym:src/db.rs:query", "build and run SQL queries")?;
+let hits = mem.recall("src/db.rs", "run a SQL query", 3)?; // scoped to the region
+mem.save_dir("memory.shards")?;
+```
+
+The CCOS adapter `ShardedOctaIndex` (`integration/ccos/octa_index.rs`) wraps this and
+speaks node URIs; `examples/ccos_bridge.rs` is a runnable demo.
+
 ## Free functions
 
 ```rust

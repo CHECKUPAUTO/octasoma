@@ -262,6 +262,41 @@ drops straight into CCOS or any MCP-speaking agent. Client config:
 See [`docs/integration-ecosystem.md`](docs/integration-ecosystem.md) for the full
 CCOS / SLHAv2 integration plan.
 
+## In the CCOS cascade (the validated deployment)
+
+OctaSoma's 3-D projection is a *coarse router*, so a single **global** index over a
+large corpus collapses (validated at **0 %** exact hit over ~800 real CCOS nodes).
+The payoff comes from **sharding per causal region**: let CCOS narrow to a region
+(small N), then let OctaSoma recall *within* it. Measured on 795 real CCOS nodes
+embedded with `nomic-embed-text` (768-d):
+
+| strategy | tokens/turn | target hit | causal-relevant |
+|---|---|---|---|
+| naive (inject everything) | 3622 | 100 % | 3 % |
+| semantic-only (OctaSoma **global** 3-D) | 30 | **0 %** | 4 % |
+| **causal + semantic (per region)** | **26** | **99 %** | **100 %** |
+
+The cascade hits the target **99 % at ~26 tokens/turn — ~137× fewer than naive** —
+with fully causally-relevant context. Neither brick alone works.
+
+This deployment is a first-class type, [`ShardedMemory`](src/sharded.rs): one
+OctaSoma index per region key, with scoped `recall`, a `build_pca` bulk-builder
+(per-region PCA — the higher-recall path), and directory persistence. The CCOS
+adapter `ShardedOctaIndex` (`integration/ccos/octa_index.rs`) speaks node URIs:
+
+```rust
+use octasoma::{HashEmbedder, ShardedMemory};
+
+let mut mem = ShardedMemory::new(HashEmbedder::new(768));
+mem.insert("src/db.rs", "sym:src/db.rs:query", "build and run SQL queries")?;
+let hits = mem.recall("src/db.rs", "run a SQL query", 3)?; // scoped to the region
+mem.save_dir("memory.shards")?;
+```
+
+Reproduce the table with `examples/pipeline_bench_text.rs` (see
+[`docs/integration-ecosystem.md`](docs/integration-ecosystem.md));
+`cargo run --release --example ccos_bridge` is an offline demo.
+
 ## Evaluation
 
 All numbers are reproducible with the bundled harness and are *machine-dependent*:
