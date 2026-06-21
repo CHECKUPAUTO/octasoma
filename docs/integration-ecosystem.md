@@ -124,3 +124,44 @@ selection.
 Caveat: this plan is grounded in each repo's README/specs and the quoted
 `external_memory.rs` / `SLHAv2.md`; exact module wiring (e.g. CCOS `assemble_window`
 signature, `slha-audit` JSON shape) will be confirmed against source when building.
+
+---
+
+## Measured: the cascade, validated at real scale
+
+Run on **795 real CCOS nodes** (`scripts/rs_to_nodes.sh ~/CCOS/src`), 763 queries,
+embedded by **Ollama `nomic-embed-text` (768-d)**, via
+`examples/pipeline_bench_text.rs`:
+
+| strategy | tokens/turn | target hit | causal-relevant |
+|---|---|---|---|
+| naive (inject all) | 3622 | 100 % | 3 % |
+| **semantic-only (OctaSoma global 3-D)** | 30 | **0 %** | 4 % |
+| causal-only (CCOS region) | 158 | 100 % | 100 % |
+| **causal + semantic (triad, exact rerank)** | **26** | **99 %** | **100 %** |
+
+**Honest reading:**
+
+- **The cascade is validated.** The triad hits the target **99 % at ~26 tokens/turn
+  — ~137× fewer than naive (3622)** — with **100 % causally-relevant** context.
+  Neither brick alone works: naive is wasteful, semantic-only fails.
+- **OctaSoma's *global* 3-D recall is 0 % at this scale** — the 768→3 projection is
+  a *coarse router*, exactly as characterised in [evaluation.md](evaluation.md). It
+  is **not** the component that lands the hit.
+- **The hit comes from CCOS's causal narrowing + an exact rerank** within the small
+  region. So OctaSoma's defensible role here is the **cheap, compact, explainable,
+  visualisable coarse layer** — not the precise retriever.
+- **Deployment lesson:** OctaSoma's 3-D works *per causal region* (small N), not as
+  one global index. `pipeline_bench_text` includes two rerank rows —
+  `OctaSoma rerank` (global 3-D) vs `OctaSoma/module` (a 3-D PCA per region) — whose
+  gap measures exactly this. Index OctaSoma **per CCOS region**, not globally.
+
+Reproduce:
+
+```bash
+bash scripts/rs_to_nodes.sh <SRC_DIR> > nodes.tsv
+grep '^sym:' nodes.tsv | awk -F'\t' '{n=$1; sub(/.*:/,"",n); print "what does " n " do?\t" $1}' > queries.tsv
+cargo run --release --example pipeline_bench_text -- \
+  --corpus nodes.tsv --queries queries.tsv \
+  --url http://localhost:11434 --model nomic-embed-text --dim 768
+```
