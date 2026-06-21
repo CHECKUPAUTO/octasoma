@@ -1,33 +1,28 @@
 [package]
-name = "octasoma"
-version = "0.4.0"
+name = "octacore"
+version = "0.1.0"
 edition = "2024"
-description = "3D fractal semantic memory engine: learned PCA/JL projection, bucket PR-octree, exact 3-D k-NN, and LZ4-compressed persistence — 100% safe, stable Rust"
 license = "MIT"
-readme = "README.md"
-repository = "https://github.com/checkupauto/octasoma"
-keywords = ["octree", "semantic-memory", "knn", "pca", "embeddings"]
-categories = ["data-structures", "science", "algorithms"]
+description = "Intelligent assembly of the CHECKUPAUTO memory triad (CCOS causal + OctaSoma semantic + SLHAv2 attention) into one cascade."
+repository = "https://github.com/CHECKUPAUTO/octacore"
 
-[lib]
-name = "octasoma"
+# This crate is staged inside the octasoma repo until it lives in its own checkout.
+# The empty [workspace] table makes it its own workspace root, so it neither joins
+# nor disturbs octasoma's build. `scripts/extract_octacore.sh <DEST>` materialises
+# the standalone crate, rewriting the octasoma path dependency below into a git
+# dependency pinned to the commit this crate is verified against.
+[workspace]
 
 [dependencies]
-# The only *default* runtime dependency: a fast, pure-Rust LZ4 codec for payload
-# persistence. The agent layer and the HTTP (Ollama) embedder use only std.
-lz4_flex = "0.11"
-# Optional: pulled in only for the `mcp` feature (the JSON-RPC MCP server binary).
-serde_json = { version = "1", optional = true }
+octasoma = { git = "https://github.com/CHECKUPAUTO/octasoma", rev = "a3c276104f7ef80edb40d834c82464061472c752" }
+
+# Optional real-system adapters (built only with the matching feature):
+ccos = { git = "https://github.com/CHECKUPAUTO/CCOS", optional = true }
+scirust = { git = "https://github.com/CHECKUPAUTO/SLHAv2", optional = true }
 
 [features]
-# Builds the `octasoma-mcp` stdio JSON-RPC server (a connector for CCOS / agents).
-mcp = ["dep:serde_json"]
-
-[[bin]]
-name = "octasoma-mcp"
-required-features = ["mcp"]
-
-[profile.release]
-lto = true
-codegen-units = 1
-opt-level = 3
+default = []
+# Adapt CCOS's `ExternalMemory` into OctaCore's causal scope.
+ccos = ["dep:ccos"]
+# Visualise SLHAv2 KV-cache tiles through OctaSoma (the lens, not attention routing).
+slha = ["dep:scirust"]
