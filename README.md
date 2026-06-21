@@ -248,15 +248,21 @@ agents and the wider CHECKUPAUTO stack (CCOS, SLHAv2):
 
 ```bash
 cargo build --release --features mcp     # optional feature; adds serde_json
-octasoma-mcp memory.frac --hash          # or --url/--model for a real Ollama model
+octasoma-mcp memory.store --hash         # or --url/--model for a real Ollama model
 ```
+
+The server is **region-sharded** (`ShardedMemory`) — the validated deployment.
+`ingest`/`recall` take an optional `region`; when omitted it is derived from the
+CCOS-style uri (`sym:src/db.rs:query` → `src/db.rs`). With a `region`, `recall` is
+scoped to that causal region (the 99 %-hit path); without one it is a coarse
+cross-region merge. The store is a **directory** of per-region shards.
 
 Tools: `ingest`, `recall`, `explain`, `stats`. The `recall` result uses CCOS's
 `RecallWindow { strategy, items:[{uri,score,kind,content}], tokens }` shape, so it
 drops straight into CCOS or any MCP-speaking agent. Client config:
 
 ```json
-{ "mcpServers": { "octasoma": { "command": "octasoma-mcp", "args": ["memory.frac"] } } }
+{ "mcpServers": { "octasoma": { "command": "octasoma-mcp", "args": ["memory.store"] } } }
 ```
 
 See [`docs/integration-ecosystem.md`](docs/integration-ecosystem.md) for the full

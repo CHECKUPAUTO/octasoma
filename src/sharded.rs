@@ -193,6 +193,13 @@ impl<E: Embedder> ShardedMemory<E> {
         self.shards.len()
     }
 
+    /// The region keys, sorted (a stable order for listing/inspection).
+    pub fn region_keys(&self) -> Vec<&str> {
+        let mut keys: Vec<&str> = self.shards.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys
+    }
+
     /// Total memories across all regions.
     pub fn len(&self) -> usize {
         self.shards.values().map(FractalMemory3D::item_count).sum()

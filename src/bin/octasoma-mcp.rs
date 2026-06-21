@@ -3,17 +3,25 @@
 //!
 //! Build & run (requires the `mcp` feature):
 //! ```text
-//! cargo run --release --features mcp --bin octasoma-mcp -- memory.frac --hash
+//! cargo run --release --features mcp --bin octasoma-mcp -- memory.store --hash
 //! ```
 //!
 //! Speaks line-delimited JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`).
-//! Tools: `ingest`, `recall`, `explain`, `stats`. The `recall` result mirrors
-//! CCOS's `RecallWindow { strategy, items:[{uri,score,kind,content}], tokens }`, so
-//! it drops straight into CCOS's memory vocabulary and any MCP-speaking agent.
+//! Tools: `ingest`, `recall`, `explain`, `stats`.
+//!
+//! Memory is **region-sharded** ([`octasoma::ShardedMemory`]): one OctaSoma index
+//! per *causal region*, the deployment the real-scale benchmark validated (a single
+//! global 3-D index collapses at scale; per region it works). `ingest`/`recall`
+//! take an optional `region`; when omitted it is derived from the CCOS-style uri
+//! (`sym:src/db.rs:query` → `src/db.rs`), matching the in-process `ShardedOctaIndex`
+//! adapter. The store is a **directory** of shards + a manifest.
+//!
+//! `recall` returns CCOS's `RecallWindow { strategy, items:[{uri,score,kind,content}],
+//! tokens }` shape, so it drops straight into CCOS and any MCP-speaking agent.
 
 use std::io::{self, BufRead, Write};
 
-use octasoma::{Embedder, FractalMemory3D, HashEmbedder, OllamaEmbedder};
+use octasoma::{Embedder, HashEmbedder, OllamaEmbedder, ShardedMemory};
 use serde_json::{Value, json};
 
 /// Unit separator packing `"uri␟content"` into one payload.
@@ -39,7 +47,7 @@ fn main() {
         }
     }
     if store.is_empty() {
-        eprintln!("usage: octasoma-mcp <store.frac> [--hash] [--url U] [--model M] [--dim N]");
+        eprintln!("usage: octasoma-mcp <store_dir> [--hash] [--url U] [--model M] [--dim N]");
         std::process::exit(2);
     }
 
@@ -51,13 +59,15 @@ fn main() {
 }
 
 fn serve<E: Embedder>(embedder: E, store: &str) {
-    let mut core = if std::path::Path::new(store).exists() {
-        FractalMemory3D::load_from_disk(store, embedder.dim()).unwrap_or_else(|e| {
+    // A populated store has a manifest; otherwise start fresh.
+    let manifest = std::path::Path::new(store).join("manifest.osm");
+    let mut mem = if manifest.exists() {
+        ShardedMemory::open_dir(embedder, store).unwrap_or_else(|e| {
             eprintln!("could not open {store}: {e}");
             std::process::exit(1);
         })
     } else {
-        FractalMemory3D::new(embedder.dim(), 42)
+        ShardedMemory::new(embedder)
     };
 
     let stdin = io::stdin();
@@ -67,19 +77,14 @@ fn serve<E: Embedder>(embedder: E, store: &str) {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(resp) = handle(&line, &mut core, &embedder, store) {
+        if let Some(resp) = handle(&line, &mut mem, store) {
             let _ = writeln!(out, "{resp}");
             let _ = out.flush();
         }
     }
 }
 
-fn handle<E: Embedder>(
-    line: &str,
-    core: &mut FractalMemory3D,
-    embedder: &E,
-    store: &str,
-) -> Option<String> {
+fn handle<E: Embedder>(line: &str, mem: &mut ShardedMemory<E>, store: &str) -> Option<String> {
     let req: Value = serde_json::from_str(line).ok()?;
     let id = req.get("id").cloned();
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
@@ -99,7 +104,7 @@ fn handle<E: Embedder>(
             let p = req.get("params").cloned().unwrap_or(Value::Null);
             let name = p.get("name").and_then(Value::as_str).unwrap_or("");
             let args = p.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            let (text, is_error) = match call_tool(name, &args, core, embedder, store) {
+            let (text, is_error) = match call_tool(name, &args, mem, store) {
                 Ok(v) => (v.to_string(), false),
                 Err(e) => (e, true),
             };
@@ -115,8 +120,7 @@ fn handle<E: Embedder>(
 fn call_tool<E: Embedder>(
     name: &str,
     args: &Value,
-    core: &mut FractalMemory3D,
-    embedder: &E,
+    mem: &mut ShardedMemory<E>,
     store: &str,
 ) -> Result<Value, String> {
     let arg_str = |k: &str| {
@@ -138,12 +142,24 @@ fn call_tool<E: Embedder>(
             if text.is_empty() {
                 return Err("ingest needs `text`".into());
             }
-            let emb = embedder.embed(&text).map_err(|e| e.to_string())?;
-            let payload = format!("{uri}{SEP}{text}");
-            core.insert(&emb, Some(payload.as_bytes()));
-            core.save_to_disk(store)
+            // Region: explicit arg, else derived from the uri, else "default".
+            let region = {
+                let r = arg_str("region");
+                if !r.is_empty() {
+                    r
+                } else if !uri.is_empty() {
+                    region_of(&uri)
+                } else {
+                    "default".to_string()
+                }
+            };
+            // Pack uri+content as the payload; embed the content.
+            let packed = format!("{uri}{SEP}{text}");
+            mem.insert(&region, &packed, &text)
+                .map_err(|e| e.to_string())?;
+            mem.save_dir(store)
                 .map_err(|e| format!("save failed: {e}"))?;
-            Ok(json!({ "uri": uri, "nodes_added": 1 }))
+            Ok(json!({ "uri": uri, "region": region, "nodes_added": 1 }))
         }
         "recall" => {
             let text = {
@@ -154,15 +170,21 @@ fn call_tool<E: Embedder>(
                 return Err("recall needs `text`".into());
             }
             let k = arg_usize("k", arg_usize("budget", 5)).max(1);
-            let emb = embedder.embed(&text).map_err(|e| e.to_string())?;
+            let region = arg_str("region");
+
+            // Scoped recall within a causal region (the validated path); else a
+            // coarse cross-region merge.
+            let hits = if region.is_empty() {
+                mem.recall_global_scored(&text, k)
+            } else {
+                mem.recall_scored(&region, &text, k)
+            }
+            .map_err(|e| e.to_string())?;
+
             let mut items = Vec::new();
             let mut tokens = 0usize;
-            for (id, d2) in core.nearest_embedding(&emb, k) {
-                let raw = core
-                    .get_payload(id)
-                    .map(|b| String::from_utf8_lossy(b).into_owned())
-                    .unwrap_or_default();
-                let (uri, content) = split_payload(&raw);
+            for (packed, d2) in hits {
+                let (uri, content) = split_payload(&packed);
                 tokens += content.len() / 4 + 1;
                 items.push(json!({
                     "uri": uri,
@@ -171,7 +193,12 @@ fn call_tool<E: Embedder>(
                     "content": content,
                 }));
             }
-            Ok(json!({ "strategy": "semantic", "items": items, "tokens": tokens }))
+            let strategy = if region.is_empty() {
+                "semantic-global"
+            } else {
+                "semantic"
+            };
+            Ok(json!({ "strategy": strategy, "region": region, "items": items, "tokens": tokens }))
         }
         "explain" => {
             let text = arg_str("text");
@@ -179,9 +206,26 @@ fn call_tool<E: Embedder>(
                 return Err("explain needs `text`".into());
             }
             let k = arg_usize("k", 5).max(1);
-            let emb = embedder.embed(&text).map_err(|e| e.to_string())?;
-            match core.explain(&emb, k) {
-                None => Err("query did not project to a valid point".into()),
+            // Region: explicit, else the sole region if there is exactly one.
+            let region = {
+                let r = arg_str("region");
+                if !r.is_empty() {
+                    r
+                } else {
+                    let keys = mem.region_keys();
+                    match keys.as_slice() {
+                        [only] => only.to_string(),
+                        _ => {
+                            return Err(format!(
+                                "explain needs `region` (one of: {})",
+                                keys.join(", ")
+                            ));
+                        }
+                    }
+                }
+            };
+            match mem.explain(&region, &text, k).map_err(|e| e.to_string())? {
+                None => Err(format!("unknown region '{region}' or invalid query")),
                 Some(e) => {
                     let zoom: Vec<Value> = e
                         .zoom_path
@@ -197,20 +241,34 @@ fn call_tool<E: Embedder>(
                             json!({ "uri": uri, "content": content, "distance": nb.distance, "point": nb.point })
                         })
                         .collect();
-                    Ok(
-                        json!({ "query_point": e.query_point, "zoom_path": zoom, "neighbors": neighbors }),
-                    )
+                    Ok(json!({
+                        "region": region,
+                        "query_point": e.query_point,
+                        "zoom_path": zoom,
+                        "neighbors": neighbors,
+                    }))
                 }
             }
         }
         "stats" => Ok(json!({
-            "memories": core.item_count(),
-            "nodes": core.node_count(),
-            "arena_bytes": core.arena_size(),
-            "high_dim": core.high_dim,
+            "memories": mem.len(),
+            "regions": mem.regions(),
+            "region_keys": mem.region_keys(),
         })),
         other => Err(format!("unknown tool '{other}'")),
     }
+}
+
+/// Causal region (file) from a CCOS-style `kind:path[:symbol]` uri; falls back to
+/// the whole uri. Mirrors `integration/ccos/octa_index.rs::region_of`.
+fn region_of(uri: &str) -> String {
+    let rest = uri.split_once(':').map(|(_, r)| r).unwrap_or(uri);
+    if uri.starts_with("sym:")
+        && let Some(i) = rest.rfind(':')
+    {
+        return rest[..i].to_string();
+    }
+    rest.to_string()
 }
 
 fn split_payload(raw: &str) -> (String, String) {
@@ -232,28 +290,28 @@ fn tool_list() -> Value {
     json!([
         {
             "name": "ingest",
-            "description": "Embed `text` and store it as a semantic memory under `uri`.",
+            "description": "Embed `text` and store it as a semantic memory under `uri`, in causal region `region` (optional; derived from a CCOS-style uri when omitted).",
             "inputSchema": { "type": "object",
-                "properties": { "uri": {"type":"string"}, "text": {"type":"string"} },
+                "properties": { "uri": {"type":"string"}, "text": {"type":"string"}, "region": {"type":"string"} },
                 "required": ["text"] }
         },
         {
             "name": "recall",
-            "description": "Semantic recall: the memories nearest `text`. Returns {strategy, items:[{uri,score,kind,content}], tokens} (CCOS RecallWindow shape).",
+            "description": "Semantic recall nearest `text`. With `region` it is scoped to that causal region (the validated path); without, a coarse cross-region merge. Returns {strategy, region, items:[{uri,score,kind,content}], tokens} (CCOS RecallWindow shape).",
             "inputSchema": { "type": "object",
-                "properties": { "text": {"type":"string"}, "k": {"type":"integer","default":5} },
+                "properties": { "text": {"type":"string"}, "region": {"type":"string"}, "k": {"type":"integer","default":5} },
                 "required": ["text"] }
         },
         {
             "name": "explain",
-            "description": "Explain a recall: the query's 3-D position, the coarse→fine zoom path, and nearest memories with distances.",
+            "description": "Explain a recall within `region` (optional if only one region exists): the query's 3-D position, the coarse→fine zoom path, and nearest memories with distances.",
             "inputSchema": { "type": "object",
-                "properties": { "text": {"type":"string"}, "k": {"type":"integer","default":5} },
+                "properties": { "text": {"type":"string"}, "region": {"type":"string"}, "k": {"type":"integer","default":5} },
                 "required": ["text"] }
         },
         {
             "name": "stats",
-            "description": "Memory statistics (count, octree nodes, arena bytes).",
+            "description": "Memory statistics: total memories, region count, and region keys.",
             "inputSchema": { "type": "object", "properties": {} }
         }
     ])

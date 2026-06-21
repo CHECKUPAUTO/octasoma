@@ -25,14 +25,24 @@ JSON-RPC). The highest-leverage, decoupled move is to give OctaSoma the same
 surface: a `octasoma mcp <store.frac>` server. It lets CCOS, SLHAv2, and any agent
 use OctaSoma's semantic recall + explanation without coupling crates.
 
+**Status: implemented** (`src/bin/octasoma-mcp.rs`, `--features mcp`). The server is
+**region-sharded** (`ShardedMemory`) — the validated deployment. `ingest`/`recall`
+take an optional `region`; when omitted it is derived from the CCOS-style uri
+(`sym:src/db.rs:query` → `src/db.rs`). The store is a **directory** of per-region
+shards.
+
 **Tools (speaking CCOS's own vocabulary so results are drop-in compatible):**
 
 | Tool | Args | Returns |
 |---|---|---|
-| `ingest` | `uri`, `text` | `{uri, nodes_added}` (embed `text`, `perceive` with payload=`uri`) |
-| `recall` | `text`, `budget`/`k` | `{strategy:"semantic", items:[{uri,score,kind,content}], tokens}` |
-| `explain` | `text`, `k` | `{query_point, zoom_path:[…], neighbors:[{uri,distance,point}]}` |
-| `stats` | — | `{memories, nodes, arena}` |
+| `ingest` | `uri`, `text`, `region?` | `{uri, region, nodes_added}` |
+| `recall` | `text`, `region?`, `k`/`budget` | `{strategy, region, items:[{uri,score,kind,content}], tokens}` |
+| `explain` | `text`, `region?`, `k` | `{region, query_point, zoom_path:[…], neighbors:[{uri,distance,point}]}` |
+| `stats` | — | `{memories, regions, region_keys:[…]}` |
+
+With a `region`, `recall` is scoped to that causal region (`strategy:"semantic"` —
+the 99 %-hit path); without one it is a coarse cross-region merge
+(`strategy:"semantic-global"`).
 
 The `recall` result mirrors CCOS's `RecallWindow { strategy, items: Vec<RecallItem>,
 tokens }` with `RecallItem { uri, score, kind, content }` — so a `Recall::Semantic`
