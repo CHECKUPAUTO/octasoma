@@ -399,3 +399,7 @@ See [`docs/evaluation.md`](docs/evaluation.md) for the honest, detailed version.
 
 
 
+
+## License
+
+Dual-licensed: [PolyForm Noncommercial 1.0.0](LICENSE.md) for noncommercial and personal use; commercial license required for any commercial use. See [LICENSING.md](LICENSING.md).
