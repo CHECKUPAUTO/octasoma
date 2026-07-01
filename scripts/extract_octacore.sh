@@ -16,7 +16,7 @@ dest="${1:?usage: scripts/extract_octacore.sh <DEST_DIR>}"
 # OctaSoma commit octacore is pinned to — a commit on `master` (the API octacore
 # needs, incl. SketchIndex, is now merged). Bump when octacore needs a newer API;
 # switch to a released version/tag once OctaSoma publishes one.
-rev="3f3e7885fb1321d64ce64936a4ee00be7db871de"
+rev="3e923323afe137967dae9b4ad1d1c2e5f52cd7cb"
 octasoma_url="https://github.com/CHECKUPAUTO/octasoma"
 octacore_url="https://github.com/CHECKUPAUTO/octacore"
 
