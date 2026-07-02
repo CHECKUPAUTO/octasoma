@@ -18,10 +18,26 @@ name = "octasoma"
 lz4_flex = "0.11"
 # Optional: pulled in only for the `mcp` feature (the JSON-RPC MCP server binary).
 serde_json = { version = "1", optional = true }
+# Optional: runtime-dispatched SIMD kernels (AVX2/SSE2/NEON with a scalar
+# fallback) from the org's SciRust framework, pinned to a reviewed rev. Pulled in
+# only by the `simd` feature below; the default build keeps zero SciRust deps.
+scirust-simd = { git = "https://github.com/CHECKUPAUTO/scirust", rev = "edc94457773c4a83bd119ba362a50d6a189cfe69", optional = true }
 
 [features]
 # Builds the `octasoma-mcp` stdio JSON-RPC server (a connector for CCOS / agents).
 mcp = ["dep:serde_json"]
+# Opt-in **SIMD exact rerank** (proposal A2 of docs/scirust-improvements.md): the
+# rerank dot product — the PrecisionSketch hot path, `scores()` and the certify
+# oracle — dispatches to scirust-simd's runtime-detected AVX2/SSE2/NEON kernel
+# (4–8× at 768-d). SIMD accumulation order differs from the scalar default, so
+# scores can move in the last float bits and near-tie rankings may differ across
+# builds/platforms — the flag IS that trade, stated plainly. Everything that
+# persists (SimHash sketch bits, embeddings) stays on the scalar/f64 paths, so
+# stores remain byte-portable across the flag. (A3 — SIMD sketching — is
+# deliberately NOT here: sketch bits persist on disk, so flipping their compute
+# path under a feature flag could silently degrade existing stores; it needs a
+# store-level format marker first.)
+simd = ["dep:scirust-simd"]
 
 [[bin]]
 name = "octasoma-mcp"

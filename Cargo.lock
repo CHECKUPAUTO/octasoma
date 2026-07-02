@@ -9,6 +9,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "libc"
+version = "0.2.186"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
 name = "lz4_flex"
 version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -28,6 +34,7 @@ name = "octasoma"
 version = "0.4.0"
 dependencies = [
  "lz4_flex",
+ "scirust-simd",
  "serde_json",
 ]
 
@@ -47,6 +54,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "scirust-simd"
+version = "0.1.0"
+source = "git+https://github.com/CHECKUPAUTO/scirust?rev=edc94457773c4a83bd119ba362a50d6a189cfe69#edc94457773c4a83bd119ba362a50d6a189cfe69"
+dependencies = [
+ "libc",
+ "scirust-simd-macros",
+]
+
+[[package]]
+name = "scirust-simd-macros"
+version = "0.1.0"
+source = "git+https://github.com/CHECKUPAUTO/scirust?rev=edc94457773c4a83bd119ba362a50d6a189cfe69#edc94457773c4a83bd119ba362a50d6a189cfe69"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

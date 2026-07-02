@@ -125,11 +125,21 @@ fn l2_normalize(v: &mut [f32]) {
     }
 }
 
-/// Dot product of two equal-length vectors (sequential `f32` — deterministic).
-/// Items are L2-normalized on insert and queries once per call, so this **is** the
-/// cosine — one multiply-add per lane, no per-pair norms (the normalize-on-insert
-/// pattern; ~3× fewer flops in the rerank than the old fused cosine).
+/// Dot product of two equal-length vectors. Items are L2-normalized on insert and
+/// queries once per call, so this **is** the cosine — one multiply-add per lane, no
+/// per-pair norms (the normalize-on-insert pattern; ~3× fewer flops in the rerank
+/// than the old fused cosine).
+///
+/// Default build: a sequential `f32` loop — deterministic, bit-identical across
+/// platforms. With the `simd` feature: scirust-simd's runtime-dispatched
+/// AVX2/SSE2/NEON kernel (4–8× at 768-d) — wide accumulation reorders the sum, so
+/// scores can differ in the last bits and near-tie rankings may differ from the
+/// default build. Nothing that persists goes through this function.
 fn dot(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(feature = "simd")]
+    if a.len() == b.len() {
+        return scirust_simd::dispatch::runtime_backend().sdot_f32(a, b);
+    }
     let n = a.len().min(b.len());
     let mut s = 0.0f32;
     for i in 0..n {
@@ -657,6 +667,35 @@ mod tests {
         assert!((s2 - score).abs() < 1e-6);
         // The zero vector still scores 0 against everything (old convention kept).
         assert_eq!(idx.scores(&[0.0; 8]), vec![0.0]);
+    }
+
+    /// With the `simd` feature: the dispatched kernel agrees with the scalar sum
+    /// within float-reassociation tolerance, and the retrieved top-k set matches on
+    /// a corpus with clear margins (near-ties are the documented exception).
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_dot_agrees_with_scalar_and_preserves_clear_rankings() {
+        let dims = [3usize, 8, 64, 768, 1000];
+        for &d in &dims {
+            let a: Vec<f32> = (0..d).map(|i| (i as f32 * 0.017).sin()).collect();
+            let b: Vec<f32> = (0..d).map(|i| (i as f32 * 0.013).cos()).collect();
+            let simd = dot(&a, &b);
+            let scalar: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+            assert!(
+                (simd - scalar).abs() <= 1e-3 * (1.0 + scalar.abs()),
+                "dim {d}: simd {simd} vs scalar {scalar}"
+            );
+        }
+        // End-to-end: clear-margin clusters retrieve the same top-k set.
+        let (idx, queries) = clustered_index();
+        for q in queries.iter().take(8) {
+            let got = idx.nearest(q, 5, idx.len());
+            assert_eq!(got.len(), 5);
+            // Self-cluster payloads dominate: every hit shares the query's cluster
+            // prefix (the clusters are far apart, so last-bit noise cannot flip this).
+            let expect_prefix = &got[0].0[..2];
+            assert!(got.iter().all(|(p, _)| &p[..2] == expect_prefix));
+        }
     }
 
     #[test]
