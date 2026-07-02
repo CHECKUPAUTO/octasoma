@@ -20,9 +20,22 @@ octasoma = { path = ".." }
 ccos = { git = "https://github.com/CHECKUPAUTO/CCOS", optional = true }
 scirust = { git = "https://github.com/CHECKUPAUTO/SLHAv2", optional = true }
 
+# Optional MCP server (the `octacore-mcp` binary): newline-delimited JSON-RPC over
+# stdio so any MCP client (Claude Desktop, ...) can drive the cascade.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
 [features]
 default = []
 # Adapt CCOS's `ExternalMemory` into OctaCore's causal scope.
 ccos = ["dep:ccos"]
 # Visualise SLHAv2 KV-cache tiles through OctaSoma (the lens, not attention routing).
 slha = ["dep:scirust"]
+# Expose the cascade to AI agents over the Model Context Protocol (stdio).
+mcp = ["dep:serde", "dep:serde_json"]
+
+# The MCP server binary is built only with `--features mcp`.
+[[bin]]
+name = "octacore-mcp"
+path = "src/bin/octacore-mcp.rs"
+required-features = ["mcp"]
