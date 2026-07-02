@@ -28,7 +28,7 @@ dev-dependencies; the scalar, bit-deterministic paths remain the defaults.
 | **B2** conformal recall sets | ✅ landed | `MemoryKernel::recall_set` — dynamic-size recall with a coverage guarantee, calibrated on the explicit feedback log |
 | **B3** temperature scaling | ✅ landed | `src/calibration.rs` + `RelevanceFeedback::fit_temperature` — binary temperature on score logits, ECE-verified |
 | Feedback channel (B2/B3 prereq) | ✅ landed | `src/feedback.rs`, `MemoryKernel::feedback`, `memory_feedback` tool, MCP `feedback` tool — the explicit-channel decision on record |
-| **C3** NSGA-II tuning | ⏳ needs decision | dev-dependency policy (scirust-evo pulls rand/rayon/tracing) |
+| **C3** NSGA-II tuning | ✅ landed | `examples/pareto_tuning.rs` — seeded Pareto front over (bits, shortlist); scirust-evo as dev-dependency (accepted policy) |
 | **C4** symreg recall law | ⏳ open | builds on D1 sweep data |
 | **B4** learned projection | ⏳ open | heaviest dep (scirust-core); research-grade |
 | **A5** wgpu batch scoring | ⏳ open | needs a GPU/CI story |
