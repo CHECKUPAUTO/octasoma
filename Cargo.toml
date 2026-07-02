@@ -39,6 +39,13 @@ mcp = ["dep:serde_json"]
 # store-level format marker first.)
 simd = ["dep:scirust-simd"]
 
+[dev-dependencies]
+# NSGA-II for the offline Pareto tuning example (proposal C3) — a
+# **dev-dependency only** (the accepted policy): the library build stays at one
+# dependency; rand/rayon/tracing enter only when building examples/tests.
+# Pinned to the same reviewed scirust rev as the optional `simd` runtime dep.
+scirust-evo = { git = "https://github.com/CHECKUPAUTO/scirust", rev = "edc94457773c4a83bd119ba362a50d6a189cfe69" }
+
 [[bin]]
 name = "octasoma-mcp"
 required-features = ["mcp"]
