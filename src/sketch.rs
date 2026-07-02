@@ -109,19 +109,43 @@ pub fn cosine_from_hamming(h: u32, bits: usize) -> f32 {
     (std::f32::consts::PI * h as f32 / bits as f32).cos()
 }
 
-/// Full cosine similarity between two equal-length vectors (`0` if either is zero).
-fn cosine_full(a: &[f32], b: &[f32]) -> f32 {
+/// L2-normalizes `v` in place (sequential `f32` — deterministic). A zero vector is
+/// left as-is: its dot with anything is `0`, matching the old fused cosine's
+/// convention for zero vectors.
+fn l2_normalize(v: &mut [f32]) {
+    let mut n = 0.0f32;
+    for &x in v.iter() {
+        n += x * x;
+    }
+    if n > 0.0 {
+        let inv = 1.0 / n.sqrt();
+        for x in v.iter_mut() {
+            *x *= inv;
+        }
+    }
+}
+
+/// Dot product of two equal-length vectors. Items are L2-normalized on insert and
+/// queries once per call, so this **is** the cosine — one multiply-add per lane, no
+/// per-pair norms (the normalize-on-insert pattern; ~3× fewer flops in the rerank
+/// than the old fused cosine).
+///
+/// Default build: a sequential `f32` loop — deterministic, bit-identical across
+/// platforms. With the `simd` feature: scirust-simd's runtime-dispatched
+/// AVX2/SSE2/NEON kernel (4–8× at 768-d) — wide accumulation reorders the sum, so
+/// scores can differ in the last bits and near-tie rankings may differ from the
+/// default build. Nothing that persists goes through this function.
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(feature = "simd")]
+    if a.len() == b.len() {
+        return scirust_simd::dispatch::runtime_backend().sdot_f32(a, b);
+    }
     let n = a.len().min(b.len());
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    let mut s = 0.0f32;
     for i in 0..n {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
+        s += a[i] * b[i];
     }
-    if na <= 0.0 || nb <= 0.0 {
-        return 0.0;
-    }
-    dot / (na.sqrt() * nb.sqrt())
+    s
 }
 
 // ---------------------------------------------------------------------------
@@ -193,9 +217,14 @@ impl SketchIndex {
         if embedding.len() != self.dim {
             return false;
         }
-        self.embeddings.extend_from_slice(embedding);
+        // Sketch the *raw* embedding (sign-of-dot is scale-invariant, so the sketch
+        // is the same — and stays bit-identical with pre-v2 stores), then store the
+        // embedding L2-normalized so the exact rerank is a single dot per candidate.
         self.sketches
             .extend_from_slice(&self.hasher.sketch(embedding));
+        let start = self.embeddings.len();
+        self.embeddings.extend_from_slice(embedding);
+        l2_normalize(&mut self.embeddings[start..]);
         let off = self.payloads.len();
         self.payloads.extend_from_slice(payload);
         self.offsets.push((off, payload.len()));
@@ -245,10 +274,13 @@ impl SketchIndex {
             cand.truncate(m);
         }
 
-        // 2. Exact cosine rerank of the shortlist.
+        // 2. Exact cosine rerank of the shortlist (normalize the query once; items
+        //    are pre-normalized, so each candidate costs a single dot).
+        let mut qn = query.to_vec();
+        l2_normalize(&mut qn);
         let mut scored: Vec<(f32, usize)> = cand
             .iter()
-            .map(|&(_, i)| (cosine_full(self.embedding(i), query), i))
+            .map(|&(_, i)| (dot(self.embedding(i), &qn), i))
             .collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         scored.truncate(k);
@@ -260,8 +292,10 @@ impl SketchIndex {
     /// smaller id (deterministic; a tie-swap can only make the certificate
     /// pessimistic, never invalid).
     fn exact_top_ids(&self, query: &[f32], k: usize) -> Vec<usize> {
+        let mut qn = query.to_vec();
+        l2_normalize(&mut qn);
         let mut scored: Vec<(f32, usize)> = (0..self.len())
-            .map(|i| (cosine_full(self.embedding(i), query), i))
+            .map(|i| (dot(self.embedding(i), &qn), i))
             .collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
         scored.truncate(k.min(self.len()));
@@ -374,11 +408,13 @@ impl SketchIndex {
         if query.len() != self.dim || k == 0 {
             return Vec::new();
         }
+        let mut qn = query.to_vec();
+        l2_normalize(&mut qn);
         let mut scored: Vec<(f32, usize)> = ids
             .iter()
             .filter_map(|&id| {
                 let i = id as usize;
-                (i < self.len()).then(|| (cosine_full(self.embedding(i), query), i))
+                (i < self.len()).then(|| (dot(self.embedding(i), &qn), i))
             })
             .collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -420,8 +456,10 @@ impl SketchIndex {
         if query.len() != self.dim {
             return Vec::new();
         }
+        let mut qn = query.to_vec();
+        l2_normalize(&mut qn);
         (0..self.len())
-            .map(|i| cosine_full(self.embedding(i), query))
+            .map(|i| dot(self.embedding(i), &qn))
             .collect()
     }
 
@@ -430,11 +468,12 @@ impl SketchIndex {
     /// Serialises the index to a versioned `SKCH` file (little-endian; the payload
     /// arena is LZ4-compressed). The hyperplanes are *not* stored — they are
     /// regenerated from the seed on load — so the file is `count·(dim·4 + bits/8)`
-    /// bytes plus payloads.
+    /// bytes plus payloads. **v2**: embeddings are stored L2-normalized (cosine =
+    /// dot); v1 files (raw embeddings) are still read and migrated on load.
     pub fn save_to_disk(&self, path: &str) -> io::Result<()> {
         let mut w = BufWriter::new(File::create(path)?);
         w.write_all(b"SKCH")?;
-        w.write_all(&1u32.to_le_bytes())?; // version
+        w.write_all(&2u32.to_le_bytes())?; // version (2 = normalized embeddings)
         w.write_all(&(self.dim as u32).to_le_bytes())?;
         w.write_all(&(self.hasher.bits() as u32).to_le_bytes())?;
         w.write_all(&self.seed.to_le_bytes())?;
@@ -471,7 +510,7 @@ impl SketchIndex {
             return Err(invalid("not a SketchIndex file (bad magic)"));
         }
         let version = read_u32(&mut r)?;
-        if version != 1 {
+        if version != 1 && version != 2 {
             return Err(invalid(&format!(
                 "unsupported SketchIndex version {version}"
             )));
@@ -487,9 +526,27 @@ impl SketchIndex {
         let count = read_u64(&mut r)? as usize;
         let words = bits / 64;
 
+        // Validate-before-allocate (see `fileguard`): each item needs dim·4 bytes of
+        // embedding + words·8 of sketch + 16 of payload offsets in the (already
+        // fully read) file — a hostile header cannot request more memory than the
+        // file actually carries.
+        crate::fileguard::guard_count(
+            "SKCH items",
+            count,
+            dim * 4 + words * 8 + 16,
+            r.len() as u64,
+        )?;
         let mut embeddings = vec![0f32; count * dim];
         for e in embeddings.iter_mut() {
             *e = read_f32(&mut r)?;
+        }
+        // v1 stored raw embeddings; v2 stores them L2-normalized (cosine = a single
+        // dot). Normalizing here migrates a v1 file transparently — and is a no-op
+        // (modulo last-bit float noise) on already-normalized data.
+        if version == 1 {
+            for i in 0..count {
+                l2_normalize(&mut embeddings[i * dim..(i + 1) * dim]);
+            }
         }
         let mut sketches = vec![0u64; count * words];
         for s in sketches.iter_mut() {
@@ -504,10 +561,21 @@ impl SketchIndex {
 
         let decomp_len = read_u64(&mut r)? as usize;
         let comp_len = read_u64(&mut r)? as usize;
+        crate::fileguard::guard_count("SKCH payload arena", comp_len, 1, r.len() as u64)?;
+        crate::fileguard::guard_decompressed(
+            "SKCH payload arena",
+            decomp_len as u64,
+            comp_len as u64,
+        )?;
         let mut comp = vec![0u8; comp_len];
         r.read_exact(&mut comp)?;
         let payloads = lz4_flex::decompress(&comp, decomp_len)
             .map_err(|e| invalid(&format!("lz4 decompression failed: {e}")))?;
+        // `payload(i)` slices without checks at query time — reject bad records now,
+        // as a clean load error instead of a later panic.
+        for &(off, len) in &offsets {
+            crate::fileguard::guard_payload_bounds("SKCH item", off, len, payloads.len())?;
+        }
 
         Ok(Self {
             hasher: SimHasher::new(dim, bits, seed),
@@ -578,6 +646,160 @@ mod tests {
             }
         }
         (idx, queries) // 200 items, 40 queries
+    }
+
+    #[test]
+    fn normalize_on_insert_makes_cosine_a_dot() {
+        let mut idx = SketchIndex::new(8, 64, 3);
+        let raw = vec![3.0f32, -1.0, 2.0, 0.5, -2.0, 1.0, 4.0, -0.5];
+        assert!(idx.insert(&raw, b"a"));
+        // Stored embedding is unit-norm.
+        let stored = idx.embedding(0);
+        let n: f32 = stored.iter().map(|x| x * x).sum();
+        assert!((n - 1.0).abs() < 1e-6, "stored norm² = {n}");
+        // Self-query scores 1.0: cosine == dot on pre-normalized vectors.
+        let (payload, score) = idx.nearest(&raw, 1, 8)[0];
+        assert_eq!(payload, b"a");
+        assert!((score - 1.0).abs() < 1e-6, "self-score = {score}");
+        // A scaled copy of the query gives the same score (scale invariance).
+        let scaled: Vec<f32> = raw.iter().map(|x| x * 7.5).collect();
+        let (_, s2) = idx.nearest(&scaled, 1, 8)[0];
+        assert!((s2 - score).abs() < 1e-6);
+        // The zero vector still scores 0 against everything (old convention kept).
+        assert_eq!(idx.scores(&[0.0; 8]), vec![0.0]);
+    }
+
+    /// With the `simd` feature: the dispatched kernel agrees with the scalar sum
+    /// within float-reassociation tolerance, and the retrieved top-k set matches on
+    /// a corpus with clear margins (near-ties are the documented exception).
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_dot_agrees_with_scalar_and_preserves_clear_rankings() {
+        let dims = [3usize, 8, 64, 768, 1000];
+        for &d in &dims {
+            let a: Vec<f32> = (0..d).map(|i| (i as f32 * 0.017).sin()).collect();
+            let b: Vec<f32> = (0..d).map(|i| (i as f32 * 0.013).cos()).collect();
+            let simd = dot(&a, &b);
+            let scalar: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+            assert!(
+                (simd - scalar).abs() <= 1e-3 * (1.0 + scalar.abs()),
+                "dim {d}: simd {simd} vs scalar {scalar}"
+            );
+        }
+        // End-to-end: clear-margin clusters retrieve the same top-k set.
+        let (idx, queries) = clustered_index();
+        for q in queries.iter().take(8) {
+            let got = idx.nearest(q, 5, idx.len());
+            assert_eq!(got.len(), 5);
+            // Self-cluster payloads dominate: every hit shares the query's cluster
+            // prefix (the clusters are far apart, so last-bit noise cannot flip this).
+            let expect_prefix = &got[0].0[..2];
+            assert!(got.iter().all(|(p, _)| &p[..2] == expect_prefix));
+        }
+    }
+
+    #[test]
+    fn hostile_skch_header_is_rejected_before_allocating() {
+        // 32 bytes declaring u64::MAX items: clean InvalidData, no allocation.
+        let mut f = Vec::new();
+        f.extend_from_slice(b"SKCH");
+        f.extend_from_slice(&2u32.to_le_bytes());
+        f.extend_from_slice(&8u32.to_le_bytes()); // dim
+        f.extend_from_slice(&64u32.to_le_bytes()); // bits
+        f.extend_from_slice(&3u64.to_le_bytes()); // seed
+        f.extend_from_slice(&u64::MAX.to_le_bytes()); // hostile count
+        let path = std::env::temp_dir().join(format!("skch_hostile_{}.skch", std::process::id()));
+        std::fs::write(&path, &f).unwrap();
+        let err = SketchIndex::load_from_disk(path.to_str().unwrap(), 8).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("SKCH items"), "{err}");
+    }
+
+    #[test]
+    fn skch_payload_records_outside_the_arena_are_a_load_error_not_a_panic() {
+        // A well-formed file whose single payload record points past the arena.
+        const DIM: usize = 8;
+        let raw = [1.0f32; DIM];
+        let hasher = SimHasher::new(DIM, 64, 3);
+        let sketch = hasher.sketch(&raw);
+        let payload = b"a".to_vec();
+        let mut f = Vec::new();
+        f.extend_from_slice(b"SKCH");
+        f.extend_from_slice(&2u32.to_le_bytes());
+        f.extend_from_slice(&(DIM as u32).to_le_bytes());
+        f.extend_from_slice(&64u32.to_le_bytes());
+        f.extend_from_slice(&3u64.to_le_bytes());
+        f.extend_from_slice(&1u64.to_le_bytes()); // count
+        for &x in &raw {
+            f.extend_from_slice(&x.to_le_bytes());
+        }
+        for &w in &sketch {
+            f.extend_from_slice(&w.to_le_bytes());
+        }
+        f.extend_from_slice(&100u64.to_le_bytes()); // offset beyond the 1-byte arena
+        f.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        f.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        let comp = lz4_flex::compress(&payload);
+        f.extend_from_slice(&(comp.len() as u64).to_le_bytes());
+        f.extend_from_slice(&comp);
+        let path = std::env::temp_dir().join(format!("skch_badoff_{}.skch", std::process::id()));
+        std::fs::write(&path, &f).unwrap();
+        let err = SketchIndex::load_from_disk(path.to_str().unwrap(), DIM).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("SKCH item"), "{err}");
+    }
+
+    #[test]
+    fn v1_files_with_raw_embeddings_migrate_on_load() {
+        // Hand-craft a SKCH **v1** file (raw, unnormalized embeddings) and check the
+        // loader migrates it: after load, cosine-as-dot behaves exactly as if the
+        // items had been inserted through the current API.
+        const DIM: usize = 8;
+        const BITS: usize = 64;
+        const SEED: u64 = 3;
+        let raw = vec![3.0f32, -1.0, 2.0, 0.5, -2.0, 1.0, 4.0, -0.5];
+        let hasher = SimHasher::new(DIM, BITS, SEED);
+        let sketch = hasher.sketch(&raw);
+        let payload = b"a".to_vec();
+
+        let mut f = Vec::new();
+        f.extend_from_slice(b"SKCH");
+        f.extend_from_slice(&1u32.to_le_bytes()); // version 1 = raw embeddings
+        f.extend_from_slice(&(DIM as u32).to_le_bytes());
+        f.extend_from_slice(&(BITS as u32).to_le_bytes());
+        f.extend_from_slice(&SEED.to_le_bytes());
+        f.extend_from_slice(&1u64.to_le_bytes()); // count
+        for &x in &raw {
+            f.extend_from_slice(&x.to_le_bytes());
+        }
+        for &w in &sketch {
+            f.extend_from_slice(&w.to_le_bytes());
+        }
+        f.extend_from_slice(&0u64.to_le_bytes()); // payload offset
+        f.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        f.extend_from_slice(&(payload.len() as u64).to_le_bytes()); // decompressed len
+        let comp = lz4_flex::compress(&payload);
+        f.extend_from_slice(&(comp.len() as u64).to_le_bytes());
+        f.extend_from_slice(&comp);
+
+        let path =
+            std::env::temp_dir().join(format!("skch_v1_migrate_{}.skch", std::process::id()));
+        std::fs::write(&path, &f).unwrap();
+        let loaded = SketchIndex::load_from_disk(path.to_str().unwrap(), DIM).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // Migrated: unit-norm storage, self-query scores 1.0, sketch intact.
+        let n: f32 = loaded.embedding(0).iter().map(|x| x * x).sum();
+        assert!((n - 1.0).abs() < 1e-6, "migrated norm² = {n}");
+        let (p, score) = loaded.nearest(&raw, 1, 8)[0];
+        assert_eq!(p, b"a");
+        assert!(
+            (score - 1.0).abs() < 1e-6,
+            "self-score after migration = {score}"
+        );
+        assert_eq!(loaded.sketch_of(0), &sketch[..]);
     }
 
     #[test]
