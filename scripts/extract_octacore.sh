@@ -16,14 +16,14 @@ dest="${1:?usage: scripts/extract_octacore.sh <DEST_DIR>}"
 # OctaSoma commit octacore is pinned to — a commit on `master` (the API octacore
 # needs, incl. SketchIndex, is now merged). Bump when octacore needs a newer API;
 # switch to a released version/tag once OctaSoma publishes one.
-rev="3e923323afe137967dae9b4ad1d1c2e5f52cd7cb"
+rev="abae63fc2fefeb1962835bdf9a89e990e73f9b78"
 octasoma_url="https://github.com/CHECKUPAUTO/octasoma"
 octacore_url="https://github.com/CHECKUPAUTO/octacore"
 
 [ -d "$src" ] || { echo "no octacore/ crate at $src" >&2; exit 1; }
 mkdir -p "$dest"
 
-for f in Cargo.toml src examples README.md .gitignore .github LICENSE; do
+for f in Cargo.toml src examples docs README.md .gitignore .github LICENSE LICENSE.md LICENSING.md; do
   [ -e "$src/$f" ] && cp -r "$src/$f" "$dest/"
 done
 
