@@ -41,7 +41,12 @@
 
 #![forbid(unsafe_code)]
 
-use octasoma::{EmbedError, Embedder, SketchIndex};
+use octasoma::{EmbedError, Embedder, ShortlistCertificate, SketchIndex};
+
+/// The optional MCP server (`--features mcp`): drive the cascade from any
+/// Model Context Protocol client. See `docs/MCP.md`.
+#[cfg(feature = "mcp")]
+pub mod mcp;
 
 /// Unit separator packing `"uri␟content"` into one global-index payload.
 const SEP: char = '\u{1f}';
@@ -95,6 +100,10 @@ pub struct Cascade<E: Embedder, C: CausalScope> {
     causal: C,
     embedder: E,
     global: SketchIndex,
+    /// A certified global-recall shortlist (see
+    /// [`Cascade::calibrate_global_shortlist`]); `None` → the legacy
+    /// `(k · 32).max(256)` heuristic.
+    global_shortlist: Option<usize>,
 }
 
 impl<E: Embedder, C: CausalScope> Cascade<E, C> {
@@ -113,7 +122,34 @@ impl<E: Embedder, C: CausalScope> Cascade<E, C> {
             causal,
             embedder,
             global,
+            global_shortlist: None,
         }
+    }
+
+    /// **Calibrate the global-recall shortlist with a certificate** instead of the
+    /// `(k · 32).max(256)` heuristic: runs OctaSoma's RCPS certification
+    /// (`SketchIndex::certify_shortlist`) on `queries` — embedded with this
+    /// cascade's embedder — and, on success, [`Cascade::recall_global`] uses the
+    /// smallest shortlist whose expected recall loss is provably `≤ alpha` with
+    /// probability `≥ 1 − delta` (for workloads exchangeable with `queries`).
+    /// Returns the certificate so the caller can log the guarantee; `None` leaves
+    /// the heuristic in place — never a fake certificate.
+    pub fn calibrate_global_shortlist(
+        &mut self,
+        queries: &[&str],
+        k: usize,
+        alpha: f64,
+        delta: f64,
+    ) -> Result<Option<ShortlistCertificate>, EmbedError> {
+        let mut embedded = Vec::with_capacity(queries.len());
+        for q in queries {
+            embedded.push(self.embedder.embed(q)?);
+        }
+        let cert = self.global.certify_shortlist(&embedded, k, alpha, delta);
+        if let Some(c) = &cert {
+            self.global_shortlist = Some(c.shortlist.max(1));
+        }
+        Ok(cert)
     }
 
     /// The cascade: CCOS narrows to a region → OctaSoma reranks the region by
@@ -184,10 +220,12 @@ impl<E: Embedder, C: CausalScope> Cascade<E, C> {
     /// over everything added via [`Cascade::index_node`], then an exact cosine rerank
     /// — the high-precision tier the 3-D router cannot provide. Returns the top `k`.
     pub fn recall_global(&self, query: &str, k: usize) -> Result<RecallWindow, EmbedError> {
-        // A generous shortlist: recall climbs steeply with it (256-bit: recall@1 of
-        // the rerank is ~12% @32, ~70% @512). The rerank cost is linear in the
-        // shortlist (one stored-embedding dot product each), so 256+ is cheap.
-        self.recall_global_shortlisted(query, k, (k * 32).max(256))
+        // A certified shortlist when [`Cascade::calibrate_global_shortlist`] has
+        // run; otherwise the generous heuristic (recall climbs steeply with the
+        // shortlist — 256-bit: recall@1 of the rerank is ~12% @32, ~70% @512 —
+        // and the rerank cost is linear in it, so 256+ is cheap).
+        let shortlist = self.global_shortlist.unwrap_or((k * 32).max(256));
+        self.recall_global_shortlisted(query, k, shortlist)
     }
 
     /// Like [`Cascade::recall_global`], but with an explicit SimHash `shortlist` (how
@@ -369,6 +407,43 @@ pub mod slha {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The certified global shortlist replaces the (k·32).max(256) heuristic
+    /// once calibration succeeds — and refuses (leaving the heuristic) when the
+    /// calibration set cannot support the asked guarantee.
+    #[test]
+    fn calibrate_global_shortlist_installs_a_certificate() {
+        use octasoma::HashEmbedder;
+        let mut c = Cascade::new(InMemoryScope::new(), HashEmbedder::new(64));
+        let texts: Vec<String> = (0..120)
+            .map(|i| format!("durable fact {i} about subsystem {}", i % 8))
+            .collect();
+        for (i, t) in texts.iter().enumerate() {
+            c.index_node(&format!("doc:{i}"), t).unwrap();
+        }
+        let queries: Vec<&str> = texts.iter().take(30).map(String::as_str).collect();
+
+        // An impossible target refuses and keeps the heuristic.
+        assert!(
+            c.calibrate_global_shortlist(&queries, 5, 0.001, 0.1)
+                .unwrap()
+                .is_none()
+        );
+        assert!(c.global_shortlist.is_none());
+
+        // A supportable target installs the certified shortlist.
+        let cert = c
+            .calibrate_global_shortlist(&queries, 5, 0.3, 0.1)
+            .unwrap()
+            .expect("30 exchangeable queries certify alpha=0.3");
+        assert!(cert.risk_ucb <= 0.3);
+        assert_eq!(c.global_shortlist, Some(cert.shortlist.max(1)));
+        // recall_global now runs on the certified shortlist and still hits.
+        let w = c
+            .recall_global("durable fact 3 about subsystem 3", 3)
+            .unwrap();
+        assert!(w.items.iter().any(|it| it.uri == "doc:3"));
+    }
     use octasoma::HashEmbedder;
 
     fn scope() -> InMemoryScope {

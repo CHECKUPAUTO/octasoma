@@ -55,6 +55,35 @@ cargo build --features slha      # SLHAv2 KV-cache lens via OctaSoma
 The `ccos` and `slha` features pull the upstream crates by git and require them to
 build; the default build needs only OctaSoma and is fully offline.
 
+## Use it from an AI agent (MCP)
+
+OctaCore ships an [MCP](https://modelcontextprotocol.io) server so any
+MCP-compatible agent (Claude Desktop, IDE assistants, custom clients) can drive
+the cascade as a memory tool — built only with the `mcp` feature:
+
+```bash
+cargo build --release --features mcp     # builds the `octacore-mcp` binary
+```
+
+It speaks JSON-RPC 2.0 over stdio (the MCP stdio transport) and exposes the tools
+`remember`, `recall`, `stats` and `clear`. Point your client at the binary — e.g.
+Claude Desktop's `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "octacore": {
+      "command": "/abs/path/to/target/release/octacore-mcp",
+      "env": { "OCTACORE_MCP_STORE": "/abs/path/to/octacore-memory.json" }
+    }
+  }
+}
+```
+
+Tool schemas, an example session, and other clients are documented in
+[`docs/MCP.md`](docs/MCP.md). The server runs the offline, deterministic cascade
+(`HashEmbedder` + the built-in causal scope), so it needs no model or network.
+
 ## Status & staging
 
 This crate is **staged inside the OctaSoma repository** under `octacore/` (its own
