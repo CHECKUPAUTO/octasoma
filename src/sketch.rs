@@ -730,6 +730,59 @@ impl SketchIndex {
         cand.into_iter().map(|(_, id)| id).collect()
     }
 
+    /// **GPU batch scoring** (proposal A5, `gpu` feature): the exact cosine of
+    /// **every** item against **every** query — `queries.len() × len()` values —
+    /// as a single `Q · Eᵀ` GEMM on the pre-normalized F32 storage (the shader's
+    /// transpose flag reads the row-major embeddings directly; no copy). Row `i`
+    /// of the result is `scores(queries[i])` within float tolerance.
+    ///
+    /// For the workloads that genuinely score everything (viewer heat-maps,
+    /// cross-shard global recall, benchmark sweeps). GPU accumulation is NOT
+    /// bit-identical to [`SketchIndex::scores`] — tolerance-validated, never the
+    /// default path. Errors honestly: dimension-mismatched queries are
+    /// `InvalidInput`, quantized tiers are `Unsupported` (stacking a second
+    /// approximation on int8/NF4 would compound silently).
+    #[cfg(feature = "gpu")]
+    pub fn scores_batch_gpu(
+        &self,
+        scorer: &crate::gpu::GpuScorer,
+        queries: &[Vec<f32>],
+    ) -> io::Result<Vec<Vec<f32>>> {
+        let EmbeddingStore::F32(embeddings) = &self.store else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "scores_batch_gpu runs on the F32 tier only (quantized tiers \
+                 would stack a second approximation)",
+            ));
+        };
+        if queries.iter().any(|q| q.len() != self.dim) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("every query must have dim {}", self.dim),
+            ));
+        }
+        if queries.is_empty() || self.is_empty() {
+            return Ok(queries.iter().map(|_| Vec::new()).collect());
+        }
+        // Q: q×dim, normalized like any single-query path.
+        let mut q_flat = Vec::with_capacity(queries.len() * self.dim);
+        for q in queries {
+            let mut qn = q.clone();
+            l2_normalize(&mut qn);
+            q_flat.extend_from_slice(&qn);
+        }
+        // C(q×n) = Q(q×dim) · Eᵀ — E is stored n×dim row-major, so tb = true.
+        let flat = scorer.gemm(
+            &q_flat,
+            embeddings,
+            queries.len(),
+            self.dim,
+            self.len(),
+            true,
+        )?;
+        Ok(flat.chunks(self.len()).map(<[f32]>::to_vec).collect())
+    }
+
     /// Exact cosine similarity of **every** item to `query`, in id (insertion)
     /// order. Empty on a dimension mismatch. Useful to colour a 3-D view by
     /// precision score.
@@ -1286,6 +1339,66 @@ mod tests {
         );
         let (p, _) = loaded.nearest(&items[7], 1, 8)[0];
         assert_eq!(p, b"m7");
+    }
+
+    /// A5: the one-GEMM batch scores match the scalar per-query path within
+    /// float tolerance, and the honest-error contracts hold. Skips gracefully
+    /// (with a visible marker) when no adapter exists; CI provides Mesa
+    /// lavapipe so the real path is exercised there.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_batch_scores_match_the_scalar_path() {
+        let scorer = match crate::gpu::GpuScorer::new() {
+            Ok(s) => s,
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                eprintln!("SKIP: no wgpu adapter ({e})");
+                return;
+            }
+            Err(e) => panic!("unexpected GPU init error: {e}"),
+        };
+        eprintln!("gpu adapter: {}", scorer.adapter_name());
+
+        const DIM: usize = 64;
+        let mut idx = SketchIndex::new(DIM, 128, 42);
+        let items: Vec<Vec<f32>> = (0..200)
+            .map(|i| {
+                (0..DIM)
+                    .map(|d| ((i * DIM + d) as f32 * 0.37).sin())
+                    .collect()
+            })
+            .collect();
+        for (i, item) in items.iter().enumerate() {
+            assert!(idx.insert(item, format!("m{i}").as_bytes()));
+        }
+        let queries: Vec<Vec<f32>> = (0..17)
+            .map(|q| {
+                (0..DIM)
+                    .map(|d| ((q * DIM + d) as f32 * 0.71).cos())
+                    .collect()
+            })
+            .collect();
+
+        let batch = idx.scores_batch_gpu(&scorer, &queries).unwrap();
+        assert_eq!(batch.len(), queries.len());
+        for (q, row) in queries.iter().zip(&batch) {
+            let scalar = idx.scores(q);
+            assert_eq!(row.len(), scalar.len());
+            for (g, c) in row.iter().zip(&scalar) {
+                assert!(
+                    (g - c).abs() <= 1e-4 * (1.0 + c.abs()),
+                    "gpu {g} vs cpu {c}"
+                );
+            }
+        }
+
+        // Honest errors: quantized tier refused, bad dims refused, empty ok.
+        let mut i8_idx = SketchIndex::new_with_precision(DIM, 128, 42, Precision::Int8);
+        i8_idx.insert(&items[0], b"x");
+        let err = i8_idx.scores_batch_gpu(&scorer, &queries).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        let err = idx.scores_batch_gpu(&scorer, &[vec![0.0; 3]]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(idx.scores_batch_gpu(&scorer, &[]).unwrap().is_empty());
     }
 
     #[test]
