@@ -50,5 +50,16 @@ jobs:
       - name: Tests — simd feature (release)
         run: cargo test --release --features simd
 
+      - name: Install Mesa lavapipe (software Vulkan, for the gpu feature)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+
+      - name: Clippy — gpu feature (deny warnings)
+        run: cargo clippy --all-targets --features gpu -- -D warnings
+
+      - name: Tests — gpu feature (release, exercises the wgpu path on lavapipe)
+        run: cargo test --release --features gpu
+
       - name: Benchmark smoke run
         run: cargo run --release --example benchmark -- 4000 64 8 200 10

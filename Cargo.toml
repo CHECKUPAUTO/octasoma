@@ -22,6 +22,13 @@ serde_json = { version = "1", optional = true }
 # fallback) from the org's SciRust framework, pinned to a reviewed rev. Pulled in
 # only by the `simd` feature below; the default build keeps zero SciRust deps.
 scirust-simd = { git = "https://github.com/CHECKUPAUTO/scirust", rev = "edc94457773c4a83bd119ba362a50d6a189cfe69", optional = true }
+# Optional: the `gpu` feature only (proposal A5) — batched Q·Eᵀ scoring as one
+# WGSL GEMM. The kernel is vendored from scirust-gpu (its `wgpu` cargo feature
+# would drag scirust-core); tolerance-validated against the CPU path, never the
+# default. CI exercises it on Mesa lavapipe (software Vulkan).
+wgpu = { version = "0.20", optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1", optional = true }
 
 [features]
 # Builds the `octasoma-mcp` stdio JSON-RPC server (a connector for CCOS / agents).
@@ -38,6 +45,12 @@ mcp = ["dep:serde_json"]
 # path under a feature flag could silently degrade existing stores; it needs a
 # store-level format marker first.)
 simd = ["dep:scirust-simd"]
+# Opt-in **GPU batch scoring** (A5): SketchIndex::scores_batch_gpu computes all
+# queries × items cosines as one GEMM (viewer heat-maps, global recall,
+# benchmark sweeps — the workloads that score everything). GPU accumulation is
+# NOT bit-identical to the scalar path: tolerance-validated, never the default;
+# no adapter → an honest Unsupported error. F32 tier only. See src/gpu.rs.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dev-dependencies]
 # NSGA-II for the offline Pareto tuning example (proposal C3) — a
